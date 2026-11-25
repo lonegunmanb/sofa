@@ -20,16 +20,23 @@
 
 引用关系和显式依赖共同生成 DAG Plan。配置依赖必须无环；实际执行可通过显式声明的 fallback 携带失败报告和其他材料返回前序工序，形成受控返工循环。
 
-顶层 `source` 块声明代码来源。例如：
+顶层 `source` 块声明代码来源。可以另写零个或多个 `preserve` 块，每个块用 `url` 和 `branch` 指定清理时要保留的分支。例如，保留下文实现工序的工作分支：
 
 ```hcl
 source "project" {
   url    = var.repository_url
   branch = var.source_branch
 }
+
+preserve {
+  url    = var.repository_url
+  branch = worker.implement.work_branch
+}
 ```
 
-起始分支会解析为固定 SHA。每个节点从指定上游提交创建自己的分支，保存检查点并推送到远端，使后续节点能够在其他机器上继续工作。中间分支集中登记，并在任务正常完成或删除时清理；明确永久保留的分支除外。Session 负责生成候选变更，可信运行时负责校验变更范围并受控推送。
+每个 `worker` 都必须用 `based_source` 指定起始分支，可以引用 `source.project.branch`，也可以引用前序工序的 `work_branch`。运行时将起始版本固定为提交 SHA，为每个实例分配独有的 `work_branch`，而不是在起始分支上直接修改。静态和动态生成的 `worker` 都遵循同一顺序：先在全局登记该 Run 所属的工作分支，登记成功后才从固定提交创建分支。Session 产生候选变更，可信运行时校验并推送。
+
+Run 结束时（无论成功或出错）或任务被删除时，运行时根据登记记录清理本次 Run 创建的中间分支。`source` 分支及匹配任一 `preserve` 的分支不清理；未登记为本次 Run 资源的其他分支不在清理范围内。
 
 ## 分布式执行
 
@@ -110,24 +117,24 @@ source "project" {
 - **计划暂停：** 当前工序继续，但不启动新的 DAG 节点。
 - **立即暂停：** 停止当前执行并舍弃未保存进度。
 - **手动重跑：** 可针对运行中或报错节点；必须隔离旧执行，并处理受影响的下游结果。
-- **删除任务：** 停止并隔离残留执行，清理任务所属资源，同时保留声明为永久保存的分支。
+- **删除任务：** 停止并隔离残留执行，清理任务所属资源，保留 `source` 分支和 `preserve` 指定的分支。
 
 ## 示例：从规格到代码
 
 下面把 Anil Bapat 的[规格驱动开发工作流](https://www.linkedin.com/pulse/spec-driven-development-smarter-way-build-ai-anil-bapat-ern7c/)映射为四个 `worker`。以“用户可以关闭邮件通知”为例，先确认用户可观察的行为，再决定如何实现。
 
-以下是 HCL 风格的设计示例，字段尚未定稿。规格和任务清单随 Git 提交交接；设计文档不进仓库，作为 Artifact 交接。前三道工序各自等待人类审查当前文档，下游只读取获批版本。`from` 指定检出的提交，`import_artifact` 则按上游产物版本导入文件；示例中的 `import_artifact.design.path` 是文件在**消费方**的路径。
+以下是 HCL 风格的设计示例，字段尚未定稿。规格和任务清单随 Git 提交交接；设计文档不进仓库，作为 Artifact 交接。前三道工序各自等待人类审查当前文档，下游只读取获批版本。`based_source` 指定新工作分支的基线，`import_artifact` 则按上游产物版本导入文件；示例中的 `import_artifact.design.path` 是文件在**消费方**的路径。
 
 ```hcl
 worker "specify" {
-  from   = source.project.commit_sha
-  prompt = "根据需求 ${var.requirement}，说明谁可以关闭通知、关闭后哪些邮件不再发送。将规格保存到仓库的 docs/spec.md。"
-  output = { spec_path = "docs/spec.md" }
+  based_source = source.project.branch
+  prompt       = "根据需求 ${var.requirement}，说明谁可以关闭通知、关闭后哪些邮件不再发送。将规格保存到仓库的 docs/spec.md。"
+  output       = { spec_path = "docs/spec.md" }
 }
 
 worker "plan" {
-  from   = worker.specify.commit_sha
-  prompt = "读取仓库中的 ${worker.specify.output.spec_path}，设计偏好存储、发送前的检查及测试方案，将设计保存到 ${artifact("design").path}。"
+  based_source = worker.specify.work_branch
+  prompt       = "读取仓库中的 ${worker.specify.output.spec_path}，设计偏好存储、发送前的检查及测试方案，将设计保存到 ${artifact("design").path}。"
 
   artifact "design" {
     type = "file"
@@ -136,7 +143,7 @@ worker "plan" {
 }
 
 worker "tasks" {
-  from = worker.specify.commit_sha
+  based_source = worker.specify.work_branch
   import_artifact "design" {
     sources = [worker.plan.artifact.design]
   }
@@ -145,8 +152,8 @@ worker "tasks" {
 }
 
 worker "implement" {
-  from   = worker.tasks.commit_sha
-  prompt = "读取仓库中的 ${worker.tasks.output.tasks_path}，按依赖顺序逐项实现。每项交给 QC 验证，测试通过且人类批准该提交后才开始下一项。"
+  based_source = worker.tasks.work_branch
+  prompt       = "读取仓库中的 ${worker.tasks.output.tasks_path}，按依赖顺序逐项实现。每项交给 QC 验证，测试通过且人类批准该提交后才开始下一项。"
 }
 ```
 
