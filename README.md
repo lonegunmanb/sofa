@@ -16,23 +16,16 @@
 
 ## 声明式流程与 Plan
 
-一个目录就是一个 workflow，目录中的 HCL 文件共享配置作用域，不需要用巨大的 `workflow` 块包裹全部内容。流程可用 `variable` 接收需求、仓库和模型等输入，以工序 block 描述需求分析、架构设计、开发与测试，并通过嵌套 module 封装可复用流程。
+一个目录就是一个 workflow，目录中的 HCL 文件共享配置作用域，不需要用 `workflow` 块包裹全部内容。所有块名都使用小写蛇形命名（lower snake case）。流程用 `variable` 接收需求、仓库和模型等输入，用 `worker` 描述需求分析、架构设计、开发或测试等工序，用可嵌套的 `module` 封装可复用流程。
 
 引用关系和显式依赖共同生成 DAG Plan。配置依赖必须无环；实际执行可通过显式声明的 fallback 携带失败报告和其他材料返回前序工序，形成受控返工循环。
 
-顶层的 `source` 和 `destination` 用于定义代码输入与交付。例如：
+顶层 `source` 块声明代码来源。例如：
 
 ```hcl
 source "project" {
   url    = var.repository_url
   branch = var.source_branch
-}
-
-destination "delivery" {
-  url       = var.repository_url
-  branch    = var.destination_branch
-  from      = stage.deliver.commit_sha
-  retention = "permanent"
 }
 ```
 
@@ -58,7 +51,9 @@ destination "delivery" {
 
 ## 工序、Session 与隔离
 
-一个工序 block 可以描述小任务，也可以承载一个 spec 的完整开发过程。工序可配置 Work Session 和独立 QC Session，由同一节点 Actor 管理，在同一机器上的独立容器中运行，并挂载同一个项目工作卷。QC 检查期间冻结待审候选，避免审查过程中代码继续变化。
+一个 `worker` 可以描述小任务，也可以承载一个 spec 的完整开发过程。其配置参考 [r42 的静态研究工序（`static_research`）](https://github.com/lonegunmanb/r42#example)：可选择模型提供方（`model_provider`）和模型（`model`），设置重试策略（`retry`）、思考强度（`reasoning_effort`）、可用工具（`tools`）及 MCP 提供方（`mcp_providers`）。
+
+同一 `worker` 可配置 Work Session 和独立 QC Session。两者由同一节点 Actor 管理，在同一机器上的独立容器中运行，并挂载同一个项目工作卷。QC 检查期间冻结待审候选，避免审查过程中代码继续变化。
 
 节点只有通过配置的质检与确定性门禁才能发布成功结果。报告中写“通过”不能替代真实命令退出码、测试记录和代码版本校验。
 
@@ -75,7 +70,7 @@ destination "delivery" {
 检查点至少绑定以下信息：
 
 ```text
-Checkpoint {
+checkpoint {
   run_id, node_id, session_id
   execution_epoch, checkpoint_sequence
   git_commit_sha
