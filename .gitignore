@@ -29,6 +29,13 @@ go.work.sum
 # env file
 .env
 
+# Frontend (Vue / Vite)
+node_modules/
+web/dist/
+
+# Local runtime scratch/state (test & dev)
+.sofa/
+
 # Editor/IDE
 # .idea/
 # .vscode/
