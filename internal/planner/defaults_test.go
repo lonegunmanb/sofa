@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/sofa/internal/config"
 	"github.com/stretchr/testify/require"
@@ -119,4 +120,58 @@ func loadDefaultTestBlocks(t *testing.T, dir string) []*golden.HclBlock {
 	require.NoError(t, err)
 	require.False(t, diags.HasErrors(), diags.Error())
 	return loaded.Blocks
+}
+
+func TestRootDefaultsInspectionAndResolution(t *testing.T) {
+	blocks := []*golden.HclBlock{
+		testRootBlock("source", "source_a"),
+		testRootBlock("source", "source_b"),
+		testRootBlock("sandbox", "go_env"),
+		testRootBlock("model_provider", "primary"),
+	}
+	defaults := InspectRootDefaults(blocks)
+	require.Equal(t, []string{"source_a", "source_b"}, defaults.Sources)
+	require.Equal(t, []string{"go_env"}, defaults.Sandboxes)
+	require.Equal(t, []string{"primary"}, defaults.ModelProviders)
+
+	sandbox, err := defaults.ResolveDefaultSandbox("worker.implement")
+	require.NoError(t, err)
+	require.Equal(t, "go_env", sandbox)
+	provider, err := defaults.ResolveDefaultModelProvider("worker.implement")
+	require.NoError(t, err)
+	require.NotNil(t, provider)
+	require.Equal(t, "primary", *provider)
+}
+
+func TestRootDefaultsZeroAndAmbiguous(t *testing.T) {
+	empty := InspectRootDefaults(nil)
+	_, err := empty.ResolveDefaultSandbox("worker.implement")
+	require.ErrorContains(t, err, "no sandbox")
+	provider, err := empty.ResolveDefaultModelProvider("worker.implement")
+	require.NoError(t, err)
+	require.Nil(t, provider)
+
+	ambiguous := InspectRootDefaults([]*golden.HclBlock{
+		testRootBlock("sandbox", "first"),
+		testRootBlock("sandbox", "second"),
+		testRootBlock("model_provider", "primary"),
+		testRootBlock("model_provider", "backup"),
+	})
+	_, err = ambiguous.ResolveDefaultSandbox("worker.implement")
+	require.ErrorContains(t, err, "multiple sandbox")
+	require.ErrorContains(t, err, "first")
+	require.ErrorContains(t, err, "second")
+	_, err = ambiguous.ResolveDefaultModelProvider("worker.implement")
+	require.ErrorContains(t, err, "multiple model_provider")
+	require.ErrorContains(t, err, "primary")
+	require.ErrorContains(t, err, "backup")
+}
+
+func testRootBlock(blockType, name string) *golden.HclBlock {
+	return &golden.HclBlock{
+		Block: &hclsyntax.Block{
+			Type:   blockType,
+			Labels: []string{"", name},
+		},
+	}
 }

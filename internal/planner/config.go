@@ -12,7 +12,10 @@ import (
 	"github.com/lonegunmanb/go-defaults"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/sofa/internal/config"
+	mcpspec "github.com/lonegunmanb/sofa/internal/mcp/spec"
 	modulespec "github.com/lonegunmanb/sofa/internal/module/spec"
+	providerpkg "github.com/lonegunmanb/sofa/internal/provider"
+	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
 	sourcespec "github.com/lonegunmanb/sofa/internal/source"
 	specpkg "github.com/lonegunmanb/sofa/internal/spec"
 	"github.com/zclconf/go-cty/cty"
@@ -45,6 +48,9 @@ func RegisterBlocks() {
 		golden.RegisterBlock(&modulespec.OutputBlock{})
 		golden.RegisterBlock(&sourcespec.SourceBlock{})
 		golden.RegisterBlock(&sourcespec.PreserveBlock{})
+		golden.RegisterBlock(&providerpkg.ModelProviderBlock{})
+		golden.RegisterBlock(&mcpspec.ServerBlock{})
+		golden.RegisterBlock(&sandboxspec.SandboxBlock{})
 	})
 }
 

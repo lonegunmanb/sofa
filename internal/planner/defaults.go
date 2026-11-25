@@ -10,12 +10,71 @@ import (
 	"github.com/lonegunmanb/golden"
 )
 
-type rootSourceDeclaration struct {
-	name string
+type SingletonStatus uint8
+
+const (
+	SingletonNone SingletonStatus = iota
+	SingletonUnique
+	SingletonAmbiguous
+)
+
+type RootDefaults struct {
+	Sources        []string
+	Sandboxes      []string
+	ModelProviders []string
+}
+
+func InspectRootDefaults(blocks []*golden.HclBlock) RootDefaults {
+	var defaults RootDefaults
+	for _, block := range blocks {
+		if block == nil || len(block.Labels) != 2 || block.Labels[0] != "" {
+			continue
+		}
+		switch block.Type {
+		case "source":
+			defaults.Sources = append(defaults.Sources, block.Labels[1])
+		case "sandbox":
+			defaults.Sandboxes = append(defaults.Sandboxes, block.Labels[1])
+		case "model_provider":
+			defaults.ModelProviders = append(defaults.ModelProviders, block.Labels[1])
+		}
+	}
+	return defaults
+}
+
+func (d RootDefaults) ResolveDefaultSandbox(consumerAddr string) (string, error) {
+	switch len(d.Sandboxes) {
+	case 0:
+		return "", fmt.Errorf("%s requires a sandbox, but the root module declares no sandbox block", consumerAddr)
+	case 1:
+		return d.Sandboxes[0], nil
+	default:
+		return "", fmt.Errorf(
+			"%s encounters multiple sandbox blocks in the root module (%s); set sandbox explicitly",
+			consumerAddr,
+			strings.Join(d.Sandboxes, ", "),
+		)
+	}
+}
+
+func (d RootDefaults) ResolveDefaultModelProvider(consumerAddr string) (*string, error) {
+	switch len(d.ModelProviders) {
+	case 0:
+		return nil, nil
+	case 1:
+		name := d.ModelProviders[0]
+		return &name, nil
+	default:
+		return nil, fmt.Errorf(
+			"%s encounters multiple model_provider blocks in the root module (%s); set model_provider explicitly",
+			consumerAddr,
+			strings.Join(d.ModelProviders, ", "),
+		)
+	}
 }
 
 func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
-	var sources []rootSourceDeclaration
+	defaults := InspectRootDefaults(blocks)
 	type omittedPreserve struct {
 		name       string
 		blockIndex int
@@ -27,8 +86,6 @@ func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 			continue
 		}
 		switch block.Type {
-		case "source":
-			sources = append(sources, rootSourceDeclaration{name: block.Labels[1]})
 		case "preserve":
 			if _, explicitURL := block.Body.Attributes["url"]; !explicitURL {
 				preserves = append(preserves, omittedPreserve{
@@ -42,7 +99,7 @@ func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 		return blocks, nil
 	}
 
-	switch len(sources) {
+	switch len(defaults.Sources) {
 	case 0:
 		return nil, fmt.Errorf(
 			"preserve %q omits url, but no source block is declared in root module",
@@ -50,19 +107,15 @@ func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 		)
 	case 1:
 	default:
-		names := make([]string, 0, len(sources))
-		for _, source := range sources {
-			names = append(names, source.name)
-		}
 		return nil, fmt.Errorf(
 			"preserve %q omits url, but multiple source blocks are declared in root module (%s); set url explicitly",
 			preserves[0].name,
-			strings.Join(names, ", "),
+			strings.Join(defaults.Sources, ", "),
 		)
 	}
 
 	result := append([]*golden.HclBlock(nil), blocks...)
-	sourceName := sources[0].name
+	sourceName := defaults.Sources[0]
 	for _, preserve := range preserves {
 		original := blocks[preserve.blockIndex]
 		traversal := hcl.Traversal{
