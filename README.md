@@ -112,7 +112,9 @@ source "project" {
 
 ## 示例：从规格到代码
 
-下面把 Anil Bapat 的[规格驱动开发工作流](https://www.linkedin.com/pulse/spec-driven-development-smarter-way-build-ai-anil-bapat-ern7c/)映射为四个 `worker`。以“用户可以关闭邮件通知”为例，先确认用户可观察的行为，再决定如何实现。以下是伪代码，不是可执行 HCL；`human_review` 表示等待人类明确批准，并返回获批的版本。
+下面把 Anil Bapat 的[规格驱动开发工作流](https://www.linkedin.com/pulse/spec-driven-development-smarter-way-build-ai-anil-bapat-ern7c/)映射为四个 `worker`。以“用户可以关闭邮件通知”为例，先确认用户可观察的行为，再决定如何实现。
+
+以下是伪代码，不是可执行 HCL。`write(文件名, 输入材料, 写作要求)` 表示由该 `worker` 的 Agent 根据输入材料和要求撰写文档，并返回对应的文档版本供审查；它不是 HCL 内置函数。`human_review` 等待人类明确批准，返回获批的版本。
 
 ```text
 worker "specify" {
