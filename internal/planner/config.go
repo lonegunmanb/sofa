@@ -13,6 +13,7 @@ import (
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/sofa/internal/config"
 	modulespec "github.com/lonegunmanb/sofa/internal/module/spec"
+	sourcespec "github.com/lonegunmanb/sofa/internal/source"
 	specpkg "github.com/lonegunmanb/sofa/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -35,6 +36,7 @@ var registerBlocksOnce sync.Once
 
 func init() {
 	RegisterBlocks()
+	config.RegisterRootDefaultsHook(applyRootDefaults)
 }
 
 // RegisterBlocks installs every sofa block type before HCL blocks are adapted.
@@ -42,6 +44,8 @@ func RegisterBlocks() {
 	registerBlocksOnce.Do(func() {
 		defaults.SetDefaults(&struct{}{})
 		golden.RegisterBlock(&modulespec.OutputBlock{})
+		golden.RegisterBlock(&sourcespec.SourceBlock{})
+		golden.RegisterBlock(&sourcespec.PreserveBlock{})
 	})
 }
 

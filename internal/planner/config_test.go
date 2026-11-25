@@ -13,7 +13,7 @@ import (
 
 func TestInitRejectsUnregisteredBlock(t *testing.T) {
 	dir := t.TempDir()
-	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `source "project" {}`)
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `not_registered "sample" {}`)
 
 	loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
 	require.NoError(t, err)
@@ -26,8 +26,8 @@ func TestInitRejectsUnregisteredBlock(t *testing.T) {
 	err = cfg.Init(loaded.Blocks)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unregistered")
-	require.Contains(t, err.Error(), "source")
-	require.Contains(t, err.Error(), "project")
+	require.Contains(t, err.Error(), "not_registered")
+	require.Contains(t, err.Error(), "sample")
 }
 
 func TestInitRejectsExtraneousBlockLabels(t *testing.T) {
