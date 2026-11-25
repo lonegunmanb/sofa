@@ -7,7 +7,8 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 1. **Engineering Governance**: `.specify/memory/constitution.md` (binding principles and quality gates).
 2. **System Vision & Domain Concepts**: `README.md` (design overview).
 3. **Frozen Skeleton Contracts**: `docs/hcl-contract.md` (HCL blocks, singleton defaults, `gatekeeper`, `merge`) and `docs/architecture-contract.md` (Dapr Actor topology, `daprd` standalone/distributed parity, Session tool gates, Epoch checkpoint branches, REST + WebSocket API).
-4. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
+4. **Pre-Designed Slice Blueprints**: `docs/stage1/README.md` and `docs/stage1/001-*.md` through `007-*.md` (detailed package layouts, `golden` pitfalls, struct contracts, and mandatory TDD cases for Stage 1 slices `001`–`007`; MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 1 slice).
+5. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)
 

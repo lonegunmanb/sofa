@@ -37,5 +37,5 @@ web/dist/
 .sofa/
 
 # Editor/IDE
-# .idea/
+.idea/
 # .vscode/
