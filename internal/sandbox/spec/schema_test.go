@@ -41,6 +41,7 @@ func TestSandboxConfigValidate(t *testing.T) {
 		},
 		{"mutable mount", func(c *SandboxConfig) { c.Mounts[0].ReadOnly = false }, "read_only"},
 		{"bad cpu", func(c *SandboxConfig) { c.Resources.CPUs = "0" }, "cpus"},
+		{"infinite cpu", func(c *SandboxConfig) { c.Resources.CPUs = "+Inf" }, "cpus"},
 		{"bad memory", func(c *SandboxConfig) { c.Resources.Memory = "2x" }, "memory"},
 	}
 	for _, tt := range tests {
@@ -50,14 +51,4 @@ func TestSandboxConfigValidate(t *testing.T) {
 			require.ErrorContains(t, cfg.Validate(), tt.want)
 		})
 	}
-}
-
-func cloneSandboxConfig(input SandboxConfig) SandboxConfig {
-	result := input
-	result.Mounts = append([]MountSpec{}, input.Mounts...)
-	if input.Resources != nil {
-		resources := *input.Resources
-		result.Resources = &resources
-	}
-	return result
 }

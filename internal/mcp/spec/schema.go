@@ -103,6 +103,12 @@ func (b *ServerBlock) ExecuteDuringPlan() error {
 	return nil
 }
 
+func (b *ServerBlock) ServerConfig() mcppkg.Config {
+	result := b.planned.Clone()
+	result.RuntimeName = b.CanonicalAddress()
+	return result
+}
+
 func (b *ServerBlock) Value() cty.Value {
 	toolIDs := make(map[string]cty.Value, len(b.Tools))
 	for _, tool := range b.Tools {
@@ -181,6 +187,9 @@ func stringMap(value cty.Value, field string) (map[string]string, error) {
 	if unmarked.IsNull() {
 		return map[string]string{}, nil
 	}
+	if !unmarked.IsWhollyKnown() {
+		return nil, fmt.Errorf("%s must be wholly known during plan", field)
+	}
 	converted, err := convert.Convert(unmarked, cty.Map(cty.String))
 	if err != nil {
 		return nil, fmt.Errorf("%s must be map(string)", field)
@@ -189,6 +198,9 @@ func stringMap(value cty.Value, field string) (map[string]string, error) {
 	iterator := converted.ElementIterator()
 	for iterator.Next() {
 		key, item := iterator.Element()
+		if item.IsNull() {
+			return nil, fmt.Errorf("%s value for %q must not be null", field, key.AsString())
+		}
 		result[key.AsString()] = item.AsString()
 	}
 	return result, nil

@@ -117,20 +117,36 @@ func validateAuthentication(c Config) error {
 }
 
 func ValidateHeaders(headers cty.Value) error {
+	_, err := NormalizeHeaders(headers)
+	return err
+}
+
+func NormalizeHeaders(headers cty.Value) (cty.Value, error) {
 	if headers == cty.NilVal {
-		return nil
+		return cty.NilVal, nil
 	}
-	unmarked, _ := headers.UnmarkDeep()
+	unmarked, marks := headers.UnmarkDeepWithPaths()
 	if !unmarked.IsWhollyKnown() {
-		return fmt.Errorf("headers must be wholly known during plan")
+		return cty.NilVal, fmt.Errorf("headers must be wholly known during plan")
 	}
 	if unmarked.IsNull() {
-		return nil
+		return cty.NilVal, nil
 	}
-	if _, err := convert.Convert(unmarked, cty.Map(cty.String)); err != nil {
-		return fmt.Errorf("headers must be map(string)")
+	converted, err := convert.Convert(unmarked, cty.Map(cty.String))
+	if err != nil {
+		return cty.NilVal, fmt.Errorf("headers must be map(string)")
 	}
-	return nil
+	iterator := converted.ElementIterator()
+	for iterator.Next() {
+		key, value := iterator.Element()
+		if value.IsNull() {
+			return cty.NilVal, fmt.Errorf("headers value for %q must not be null", key.AsString())
+		}
+	}
+	if len(marks) > 0 {
+		converted = converted.MarkWithPaths(objectMarksToMapPaths(marks))
+	}
+	return converted, nil
 }
 
 func HeadersSensitive(headers cty.Value) bool {
@@ -138,4 +154,35 @@ func HeadersSensitive(headers cty.Value) bool {
 		return false
 	}
 	return specpkg.IsSensitive(headers)
+}
+
+func objectMarksToMapPaths(marks []cty.PathValueMarks) []cty.PathValueMarks {
+	result := make([]cty.PathValueMarks, len(marks))
+	for index, pathMarks := range marks {
+		path := make(cty.Path, len(pathMarks.Path))
+		for stepIndex, step := range pathMarks.Path {
+			if attribute, ok := step.(cty.GetAttrStep); ok {
+				step = cty.IndexStep{Key: cty.StringVal(attribute.Name)}
+			}
+			path[stepIndex] = step
+		}
+		result[index] = cty.PathValueMarks{Path: path, Marks: pathMarks.Marks}
+	}
+	return result
+}
+
+func (c Config) Clone() Config {
+	result := c
+	result.WireAPI = clonePointer(c.WireAPI)
+	result.Transport = clonePointer(c.Transport)
+	result.APIKey = clonePointer(c.APIKey)
+	result.APIKeyRef = clonePointer(c.APIKeyRef)
+	result.BearerToken = clonePointer(c.BearerToken)
+	result.BearerTokenRef = clonePointer(c.BearerTokenRef)
+	result.Retry.LifecycleRetries = clonePointer(c.Retry.LifecycleRetries)
+	result.Retry.ModelCallRetries = clonePointer(c.Retry.ModelCallRetries)
+	result.Retry.Interval = clonePointer(c.Retry.Interval)
+	result.Retry.MaxInterval = clonePointer(c.Retry.MaxInterval)
+	result.Retry.ErrorMessageRegex = append([]string{}, c.Retry.ErrorMessageRegex...)
+	return result
 }

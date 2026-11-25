@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,4 +88,63 @@ func TestSandboxRejectsUnsafeConfiguration(t *testing.T) {
 			require.ErrorContains(t, cfg.RunPlan(), tt.want)
 		})
 	}
+}
+
+func TestSandboxAllowsNullEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+sandbox "go_env" {
+  runtime    = "podman"
+  image      = "ghcr.io/example/go:1.27"
+  entrypoint = null
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+}
+
+func TestSandboxRejectsExplicitEmptyEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+sandbox "go_env" {
+  runtime    = "podman"
+  image      = "ghcr.io/example/go:1.27"
+  entrypoint = []
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.ErrorContains(t, cfg.RunPlan(), "empty list")
+}
+
+func TestSandboxConfigReturnsDeepCopy(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+  mount {
+    source = "/cache"
+    target = "/go/pkg/mod"
+  }
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+
+	var block *sandboxspec.SandboxBlock
+	for _, vertex := range cfg.GetVertices() {
+		if candidate, ok := vertex.(*sandboxspec.SandboxBlock); ok {
+			block = candidate
+		}
+	}
+	require.NotNil(t, block)
+	snapshot := block.SandboxConfig()
+	snapshot.Mounts[0].Target = "/mutated"
+	require.Equal(t, "/go/pkg/mod", block.SandboxConfig().Mounts[0].Target)
 }

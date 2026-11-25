@@ -24,7 +24,8 @@ type ModelProviderBlock struct {
 	RetryBlocks          []RetryBlock `hcl:"retry,block"`
 	APIKeyAttribute      cty.Value
 	BearerTokenAttribute cty.Value
-	planned              RetryPolicy
+	planned              Config
+	plannedRetry         RetryPolicy
 }
 
 type RetryBlock struct {
@@ -41,9 +42,7 @@ func (b *ModelProviderBlock) AddressLength() int      { return 2 }
 func (b *ModelProviderBlock) CanExecutePrePlan() bool { return false }
 
 func (b *ModelProviderBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalContext) error {
-	for _, name := range []string{
-		"type", "endpoint", "wire_api", "transport", "api_key", "api_key_ref", "bearer_token", "bearer_token_ref",
-	} {
+	for _, name := range []string{"type", "endpoint"} {
 		attribute, exists := block.Body.Attributes[name]
 		if !exists {
 			continue
@@ -53,8 +52,25 @@ func (b *ModelProviderBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalCon
 			return diags
 		}
 		unmarked, _ := value.UnmarkDeep()
+		if unmarked.IsNull() || !unmarked.IsWhollyKnown() || !unmarked.Type().Equals(cty.String) {
+			return fmt.Errorf("%s must be a known non-null string", name)
+		}
+	}
+	for _, name := range []string{"wire_api", "transport", "api_key", "api_key_ref", "bearer_token", "bearer_token_ref"} {
+		attribute, exists := block.Body.Attributes[name]
+		if !exists {
+			continue
+		}
+		value, diags := attribute.Expr.Value(ctx)
+		if diags.HasErrors() {
+			return diags
+		}
+		unmarked, _ := value.UnmarkDeep()
+		if unmarked.IsNull() {
+			continue
+		}
 		if !unmarked.IsWhollyKnown() || !unmarked.Type().Equals(cty.String) {
-			return fmt.Errorf("%s must be a known string", name)
+			return fmt.Errorf("%s must be a known string or null", name)
 		}
 	}
 	return nil
@@ -82,6 +98,11 @@ func (b *ModelProviderBlock) ExecuteDuringPlan() error {
 		}
 		config.Retry = override
 	}
+	headers, err := NormalizeHeaders(config.Headers)
+	if err != nil {
+		return err
+	}
+	config.Headers = headers
 	if err := config.Validate(); err != nil {
 		return err
 	}
@@ -89,14 +110,15 @@ func (b *ModelProviderBlock) ExecuteDuringPlan() error {
 	if err != nil {
 		return err
 	}
-	b.planned = policy
+	b.planned = config.Clone()
+	b.plannedRetry = policy
 	b.APIKeyAttribute = sensitiveString(b.APIKey)
 	b.BearerTokenAttribute = sensitiveString(b.BearerToken)
 	return nil
 }
 
 func (b *ModelProviderBlock) Value() cty.Value {
-	if b.planned.Interval == 0 {
+	if b.plannedRetry.Interval == 0 {
 		return cty.DynamicVal
 	}
 	return cty.ObjectVal(map[string]cty.Value{
@@ -104,11 +126,11 @@ func (b *ModelProviderBlock) Value() cty.Value {
 		"kind":    cty.StringVal("model_provider"),
 		"name":    cty.StringVal(b.Name()),
 		"retry": cty.ObjectVal(map[string]cty.Value{
-			"lifecycle_retries":    cty.NumberIntVal(int64(b.planned.LifecycleRetries)),
-			"model_call_retries":   cty.NumberIntVal(int64(b.planned.ModelCallRetries)),
-			"interval_seconds":     cty.NumberIntVal(int64(b.planned.Interval / time.Second)),
-			"max_interval_seconds": cty.NumberIntVal(int64(b.planned.MaxInterval / time.Second)),
-			"error_message_regex":  stringListValue(b.planned.ErrorMessageRegex),
+			"lifecycle_retries":    cty.NumberIntVal(int64(b.plannedRetry.LifecycleRetries)),
+			"model_call_retries":   cty.NumberIntVal(int64(b.plannedRetry.ModelCallRetries)),
+			"interval_seconds":     cty.NumberIntVal(int64(b.plannedRetry.Interval / time.Second)),
+			"max_interval_seconds": cty.NumberIntVal(int64(b.plannedRetry.MaxInterval / time.Second)),
+			"error_message_regex":  stringListValue(b.plannedRetry.ErrorMessageRegex),
 		}),
 	})
 }
@@ -121,7 +143,8 @@ func (b *ModelProviderBlock) BearerTokenValue() cty.Value {
 	return sensitiveString(b.BearerToken)
 }
 
-func (b *ModelProviderBlock) RetryPolicy() RetryPolicy { return b.planned }
+func (b *ModelProviderBlock) RetryPolicy() RetryPolicy { return b.plannedRetry }
+func (b *ModelProviderBlock) ProviderConfig() Config   { return b.planned.Clone() }
 
 func (b RetryBlock) override() (RetryOverride, error) {
 	interval, err := secondsDuration(b.IntervalSeconds, "interval_seconds")

@@ -3,6 +3,7 @@ package provider
 import (
 	"testing"
 
+	specpkg "github.com/lonegunmanb/sofa/internal/spec"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -78,6 +79,28 @@ func TestProviderHeadersPreserveSensitivity(t *testing.T) {
 	cfg := Config{Type: TypeOpenAI, Endpoint: "https://api.example.com", Headers: headers}
 	require.NoError(t, cfg.Validate())
 	require.True(t, HeadersSensitive(headers))
+}
+
+func TestProviderHeadersRejectUnknownAndNullElements(t *testing.T) {
+	unknown := cty.MapVal(map[string]cty.Value{
+		"X-Commit": cty.UnknownVal(cty.String),
+	})
+	require.ErrorContains(t, ValidateHeaders(unknown), "wholly known")
+
+	withNull := cty.MapVal(map[string]cty.Value{
+		"X-Optional": cty.NullVal(cty.String),
+	})
+	require.ErrorContains(t, ValidateHeaders(withNull), "null")
+}
+
+func TestNormalizeHeadersPreservesSensitivePath(t *testing.T) {
+	headers := cty.ObjectVal(map[string]cty.Value{
+		"Authorization": specpkg.MarkSensitive(cty.StringVal("secret")),
+	})
+	normalized, err := NormalizeHeaders(headers)
+	require.NoError(t, err)
+	require.True(t, normalized.Type().Equals(cty.Map(cty.String)))
+	require.True(t, specpkg.IsSensitive(normalized))
 }
 
 func ptr[T any](value T) *T                { return &value }

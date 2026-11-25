@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"regexp"
 	"strconv"
@@ -81,7 +82,7 @@ func (c SandboxConfig) Validate() error {
 	if c.Resources != nil {
 		if c.Resources.CPUs != "" {
 			cpus, err := strconv.ParseFloat(c.Resources.CPUs, 64)
-			if err != nil || cpus <= 0 {
+			if err != nil || cpus <= 0 || math.IsNaN(cpus) || math.IsInf(cpus, 0) {
 				return fmt.Errorf("sandbox resources cpus must be a positive number")
 			}
 		}
@@ -112,6 +113,7 @@ type SandboxBlock struct {
 	MountBlocks    []MountBlock     `hcl:"mount,block"`
 	ResourceBlocks []ResourcesBlock `hcl:"resources,block"`
 	planned        cty.Value
+	plannedConfig  *SandboxConfig
 }
 
 func (b *SandboxBlock) Type() string            { return "" }
@@ -123,8 +125,18 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 	if len(b.ResourceBlocks) > 1 {
 		return fmt.Errorf("sandbox must have at most one resources block")
 	}
-	if _, entrypointSet := b.HclBlock().Body.Attributes["entrypoint"]; entrypointSet && len(b.Entrypoint) == 0 {
-		return fmt.Errorf("sandbox entrypoint must not be an empty list")
+	if entrypointAttribute, entrypointSet := b.HclBlock().Body.Attributes["entrypoint"]; entrypointSet {
+		entrypointValue, diags := entrypointAttribute.Expr.Value(b.EvalContext())
+		if diags.HasErrors() {
+			return diags
+		}
+		entrypointValue, _ = entrypointValue.UnmarkDeep()
+		if !entrypointValue.IsKnown() {
+			return fmt.Errorf("sandbox entrypoint must be known during plan")
+		}
+		if !entrypointValue.IsNull() && entrypointValue.LengthInt() == 0 {
+			return fmt.Errorf("sandbox entrypoint must not be an empty list")
+		}
 	}
 	network := "none"
 	if b.Network != nil {
@@ -156,6 +168,8 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
+	plannedConfig := cloneSandboxConfig(config)
+	b.plannedConfig = &plannedConfig
 	b.planned = cty.ObjectVal(map[string]cty.Value{
 		"address": cty.StringVal(b.Address()),
 		"kind":    cty.StringVal("sandbox"),
@@ -175,6 +189,9 @@ func (b *SandboxBlock) Value() cty.Value {
 }
 
 func (b *SandboxBlock) SandboxConfig() SandboxConfig {
+	if b.plannedConfig != nil {
+		return cloneSandboxConfig(*b.plannedConfig)
+	}
 	network := "none"
 	if b.Network != nil {
 		network = *b.Network
@@ -195,6 +212,17 @@ func (b *SandboxBlock) SandboxConfig() SandboxConfig {
 		Runtime: b.Runtime, Image: b.Image, Entrypoint: append([]string{}, b.Entrypoint...),
 		Network: network, Mounts: mounts, Resources: resources,
 	}
+}
+
+func cloneSandboxConfig(config SandboxConfig) SandboxConfig {
+	result := config
+	result.Entrypoint = append([]string{}, config.Entrypoint...)
+	result.Mounts = append([]MountSpec{}, config.Mounts...)
+	if config.Resources != nil {
+		resources := *config.Resources
+		result.Resources = &resources
+	}
+	return result
 }
 
 var _ golden.PlanBlock = (*SandboxBlock)(nil)

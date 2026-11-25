@@ -24,13 +24,54 @@ const (
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Config struct {
-	Name      string
-	Transport Transport
-	Tools     []string
-	Resources []string
-	Timeout   time.Duration
-	HTTP      *HTTPConfig
-	Stdio     *StdioConfig
+	Name        string
+	RuntimeName string
+	Transport   Transport
+	Tools       []string
+	Resources   []string
+	Timeout     time.Duration
+	HTTP        *HTTPConfig
+	Stdio       *StdioConfig
+}
+
+func (c Config) Clone() Config {
+	result := c
+	result.Tools = append([]string{}, c.Tools...)
+	result.Resources = append([]string{}, c.Resources...)
+	if c.HTTP != nil {
+		httpConfig := *c.HTTP
+		httpConfig.Headers = cloneStringMap(c.HTTP.Headers)
+		httpConfig.BearerToken = cloneStringPointer(c.HTTP.BearerToken)
+		httpConfig.BearerTokenRef = cloneStringPointer(c.HTTP.BearerTokenRef)
+		result.HTTP = &httpConfig
+	}
+	if c.Stdio != nil {
+		stdioConfig := *c.Stdio
+		stdioConfig.Args = append([]string{}, c.Stdio.Args...)
+		stdioConfig.Env = cloneStringMap(c.Stdio.Env)
+		stdioConfig.EnvRefs = cloneStringMap(c.Stdio.EnvRefs)
+		result.Stdio = &stdioConfig
+	}
+	return result
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneStringPointer(input *string) *string {
+	if input == nil {
+		return nil
+	}
+	value := *input
+	return &value
 }
 
 type HTTPConfig struct {

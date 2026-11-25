@@ -50,3 +50,10 @@ description: "Tasks for providers, MCP servers, sandboxes, and root defaults"
 ## Dependencies
 
 RootDefaults precedes provider/sandbox consumers. Provider and MCP are independent. Sandbox is independent after setup. The commit/push gate is last.
+
+## Phase 7: Review Remediation
+
+- [X] T021 Reject unknown and null elements in provider and MCP map fields without panicking.
+- [X] T022 Accept explicit null for optional provider attributes while rejecting null required attributes.
+- [X] T023 Allow `sandbox.entrypoint = null`, reject an explicit empty list, and reject non-finite CPU values.
+- [X] T024 Export deep-copied planned configs from provider, MCP server, and sandbox blocks for 005/007 consumers.

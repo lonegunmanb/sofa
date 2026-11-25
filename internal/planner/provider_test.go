@@ -89,3 +89,64 @@ model_provider "primary" {
 	initPlanner(t, cfg, dir)
 	require.NoError(t, cfg.RunPlan())
 }
+
+func TestModelProviderAllowsNullOptionalAttributes(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+model_provider "primary" {
+  type             = "openai"
+  endpoint         = "https://api.example.com/v1"
+  wire_api         = null
+  transport        = null
+  api_key          = null
+  api_key_ref      = null
+  bearer_token     = null
+  bearer_token_ref = null
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+}
+
+func TestModelProviderRejectsNullRequiredAttributes(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+model_provider "primary" {
+  type     = null
+  endpoint = "https://api.example.com/v1"
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.ErrorContains(t, cfg.RunPlan(), "type must be")
+}
+
+func TestProviderConfigReturnsDeepCopy(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+model_provider "primary" {
+  type        = "openai"
+  endpoint    = "https://api.example.com/v1"
+  api_key_ref = "TOKEN"
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+
+	var block *providerpkg.ModelProviderBlock
+	for _, vertex := range cfg.GetVertices() {
+		if candidate, ok := vertex.(*providerpkg.ModelProviderBlock); ok {
+			block = candidate
+		}
+	}
+	require.NotNil(t, block)
+	snapshot := block.ProviderConfig()
+	require.Equal(t, "TOKEN", *snapshot.APIKeyRef)
+	*snapshot.APIKeyRef = "MUTATED"
+	require.Equal(t, "TOKEN", *block.ProviderConfig().APIKeyRef)
+}
