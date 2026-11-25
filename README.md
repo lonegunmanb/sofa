@@ -116,34 +116,37 @@ source "project" {
 
 下面把 Anil Bapat 的[规格驱动开发工作流](https://www.linkedin.com/pulse/spec-driven-development-smarter-way-build-ai-anil-bapat-ern7c/)映射为四个 `worker`。以“用户可以关闭邮件通知”为例，先确认用户可观察的行为，再决定如何实现。
 
-以下是伪代码，不是可执行 HCL。`write(文件名, 输入材料, 写作要求)` 表示由该 `worker` 的 Agent 根据输入材料和要求撰写文档，并返回对应的文档版本供审查；它不是 HCL 内置函数。`human_review` 等待人类明确批准，返回获批的版本。
+以下是 HCL 风格的设计示例，字段尚未定稿。规格和任务清单随 Git 提交交接；设计文档不进仓库，作为 Artifact 交接。前三道工序各自等待人类审查当前文档，下游只读取获批版本。`from` 指定检出的提交，`import_artifact` 则按上游产物版本导入文件；示例中的 `import_artifact.design.path` 是文件在**消费方**的路径。
 
-```text
+```hcl
 worker "specify" {
-  spec = write("spec.md", var.requirement, "谁可以关闭通知？关闭后哪些邮件不再发送？")
-  output = human_review(spec)
+  from   = source.project.commit_sha
+  prompt = "根据需求 ${var.requirement}，说明谁可以关闭通知、关闭后哪些邮件不再发送。将规格保存到仓库的 docs/spec.md。"
+  output = { spec_path = "docs/spec.md" }
 }
 
 worker "plan" {
-  plan = write("plan.md", worker.specify.output, "设计偏好存储、发送前的检查及测试方案")
-  output = human_review(plan)
+  from   = worker.specify.commit_sha
+  prompt = "读取仓库中的 ${worker.specify.output.spec_path}，设计偏好存储、发送前的检查及测试方案，将设计保存到 ${artifact("design").path}。"
+
+  artifact "design" {
+    type = "file"
+    path = "plan.md"
+  }
 }
 
 worker "tasks" {
-  tasks = write("tasks.md", worker.plan.output, "按依赖拆成小任务，为每项列出验收条件")
-  output = human_review(tasks)
+  from = worker.specify.commit_sha
+  import_artifact "design" {
+    sources = [worker.plan.artifact.design]
+  }
+  prompt = "读取导入的设计文档 ${import_artifact.design.path}，按依赖拆成小任务，为每项列出验收条件，将清单保存到仓库的 docs/tasks.md。"
+  output = { tasks_path = "docs/tasks.md" }
 }
 
 worker "implement" {
-  base = source.project.commit_sha
-  for task in dependency_order(worker.tasks.output):
-    candidate = implement_task(base, task)
-    evidence = qc(candidate, task.acceptance_tests)
-    while not evidence.passed:
-      candidate = revise(candidate, evidence)
-      evidence = qc(candidate, task.acceptance_tests)
-    base = human_review(candidate, evidence).commit_sha
-  publish(base)
+  from   = worker.tasks.commit_sha
+  prompt = "读取仓库中的 ${worker.tasks.output.tasks_path}，按依赖顺序逐项实现。每项交给 QC 验证，测试通过且人类批准该提交后才开始下一项。"
 }
 ```
 
