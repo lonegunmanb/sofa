@@ -5,8 +5,9 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 ## 1. Sources of Truth
 
 1. **Engineering Governance**: `.specify/memory/constitution.md` (binding principles and quality gates).
-2. **System Vision & Domain Concepts**: `README.md` (design overview; exact HCL fields, API routes, and state machines are frozen feature-by-feature in specs).
-3. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
+2. **System Vision & Domain Concepts**: `README.md` (design overview).
+3. **Frozen Skeleton Contracts**: `docs/hcl-contract.md` (HCL blocks, singleton defaults, `gatekeeper`, `merge`) and `docs/architecture-contract.md` (Dapr Actor topology, `daprd` standalone/distributed parity, Session tool gates, Epoch checkpoint branches, REST + WebSocket API).
+4. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)
 
