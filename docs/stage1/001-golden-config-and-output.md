@@ -67,6 +67,8 @@ func LoadDirectoryContext(ctx context.Context, directory string) (Loaded, hcl.Di
 4. `jsondecodewithtype(json_str, type_expr)`：使用 `hashicorp/hcl/v2/ext/typeexpr.TypeConstraintType` 作为第 2 参数类型！**关键细节**：当第 1 参数 `json_str` 在 Plan 期是 `cty.UnknownVal(cty.String)`（例如未来的 `worker.discover.result`）且第 2 参数 `type_expr` 已知时，`cty` 函数框架在 `AllowUnknown: false`（默认）下会自动返回 `cty.UnknownVal(resolvedReturnType)`！这正是 `006` 中 `dynamic_worker` 在 Plan 期获得静态类型的核心原理，务必保持第 1 参数 `AllowUnknown: false`、第 2 参数解析出精确 `cty.Type`。
 
 ### 3.4 `internal/module/spec/output.go`（`OutputBlock`）
+> **⚠️ 上游演进跟进说明**：已提交 [golden#18](https://github.com/lonegunmanb/golden/issues/18) 推进 `golden` 原生内置 `OutputBlock`。当前分片 `001` 暂用本节过渡实现；一旦 `golden#18` 解决，须立即按 [adopt-golden-output.md](./adopt-golden-output.md) 升级 `golden` 并删除此处手造的 `OutputBlock`。
+
 ```go
 type OutputBlock struct {
     *golden.BaseBlock

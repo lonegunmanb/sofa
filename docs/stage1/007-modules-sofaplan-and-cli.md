@@ -21,7 +21,7 @@
 涉及包与文件：
 - `internal/project/project.go`：管理 `<cwd>/.sofa/`（`config/`、`modules/`、`state.json` 源哈希元数据）
 - `internal/module/init.go`：扫描 `module` 块的字面量 `source`，防环路安装至 `.sofa/modules/<labels...>`（`DisableSymlinks: true`，远端 URL 报错脱敏）
-- `internal/module/spec/module.go`：`ModuleBlock`（实现 `CustomDecode` + `PlanBlock` + `SingleValueBlock`）与 `ModulePlanner` 接口
+- `internal/module/spec/module.go`：`ModuleBlock`（实现 `CustomDecode` + `PlanBlock` + `SingleValueBlock`）与 `ModulePlanner` 接口（注：若此时上游 [golden#18](https://github.com/lonegunmanb/golden/issues/18) 已合入，须同步按 [adopt-golden-output.md](./adopt-golden-output.md) 将输出块切换为 `golden` 原生 `OutputBlock` 并移除手造 `output.go`）
 - `internal/plan/model.go`：`Plan`、`NodeSpec`、`SourceSpec`、`PreserveSpec`、`SandboxSpec`、`ProviderSpec`、`MCPServerSpec`、`ToolSpec`、`OutputSpec`、`Origin`
 - `internal/plan/codec.go`：`Marshal` / `Unmarshal`（采用 `r42/internal/plan/codec.go` 同款 `ctyjson.MarshalType` + `ctymsgpack.Marshal` + `SensitivePaths` 编码，完美支持嵌套 `UnknownVal`！）
 - `internal/plan/display.go`：面向人类终端审查的脱敏 JSON 格式化器（所有携带 `golden.SensitiveMark` 的叶节点替换为 `"<sensitive>"`，未知值展示为 `"<known after apply>"`）
