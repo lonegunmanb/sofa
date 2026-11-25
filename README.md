@@ -67,21 +67,11 @@ source "project" {
 
 日记是 Session 主动编写的中期记忆，记录自上一篇以来的完成事项、发现与验证过的假设、决策依据、测试证据、未解决问题和下一步计划。它不同于完整的消息流，并属于稳定的逻辑 Session，而不是临时容器。
 
-人类可以随时在日记中插话。Session 在**每一次工具调用之前**检查日记，将尚未读取的人类插话作为 `user message` 加入上下文，不等到整轮结束或下一个检查点。插话不等于批准待决事项。
+人类可以随时在日记中向当前 `worker` 插话。Session 在**每次工具调用前**检查日记，将属于该 `worker` 的新插话作为 `user message` 加入上下文。系统向 Session 发送 `user message` 前也要检查：有新插话时，先投递人工插话，再处理原定消息。
 
-检查点至少绑定以下信息：
+提问时，人类可以勾选“回答后等待确认”。收到带此标记的提问后，Agent 必须先回答，再调用指定的暂停工具，使 Session 进入人工等待。原定消息不能触发继续执行；只有人类给出下一步指示后，Session 才能继续。普通插话既不要求暂停，也不等于批准。
 
-```text
-checkpoint {
-  run_id, node_id, session_id
-  execution_epoch, checkpoint_sequence
-  git_commit_sha
-  journal_head
-  input_versions
-  recovery_artifact_ids
-  status
-}
-```
+检查点由运行时维护，流程作者无需在 HCL 中声明。
 
 保存检查点时，先写日记，记录当前 Git 提交的 SHA；再提交变更并将检查点分支推送到远端。若提交产生了新 SHA，须在日记中追加该条目对应的最终 SHA，不能把提交前的 SHA 当作已推送的版本。确认远端分支与日记记录一致、日记和恢复元数据已写入共享持久存储、所需非 Git 文件也已上传后，才能将检查点标记为完整。
 
