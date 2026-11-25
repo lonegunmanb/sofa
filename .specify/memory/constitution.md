@@ -33,6 +33,13 @@ Safety, isolation, and quality invariants MUST be enforced deterministically by 
 
 Standalone local-directory mode and distributed Dapr Actor mode MUST share identical domain semantics, management APIs, recovery rules, and idempotency guarantees. Every Run, DAG node, Work/QC Session, execution epoch, structured diary entry, human intervention/approval, Git work branch registration, checkpoint, and immutable Artifact version MUST be persisted as auditable state so any delivered software change can be traced back to its requirement, verification evidence, recovery lineage, and human decisions.
 
+### VI. Research-First & Surgical Task Sizing (NON-NEGOTIABLE)
+
+Before committing to, specifying, or accepting any feature slice or implementation task, contributors MUST:
+
+- **Investigate Before Deciding**: Inspect actual source code and capabilities of upstream dependencies (`golden`, `copilot-sdk/go`, `dapr/go-sdk`), reference implementations (`r42`), and the existing repository first. Scoping a task on assumptions or re-implementing capabilities already provided by dependencies is prohibited.
+- **Reject Oversized Scopes**: Every feature slice (`specs/<###-feature>/`) and every task in `tasks.md` MUST be small, single-purpose, and independently verifiable. Contributors MUST proactively push back on and split any proposed spec, plan, or task that bundles multiple subsystems, multiple unrelated HCL block families, or broad cross-cutting concerns before proceeding to `/speckit-specify` or implementation.
+
 ## Technology Stack & Architectural Constraints
 
 - **Backend, DSL & Agent Runtime**: Go (`module github.com/lonegunmanb/sofa`), using:
@@ -47,14 +54,15 @@ Standalone local-directory mode and distributed Dapr Actor mode MUST share ident
 
 ## Development Workflow & Quality Gates
 
-1. **Specify (`/speckit-specify` & `/speckit-clarify`)**: Define user/operator stories, deterministic invariants, failure/recovery cases, and measurable acceptance criteria in `specs/<###-feature>/spec.md`.
-2. **Plan (`/speckit-plan`)**: Resolve technical unknowns in `research.md`, define state machines and schemas in `data-model.md` and `contracts/`, and pass the **Constitution Check** gate in `plan.md`.
-3. **Tasks (`/speckit-tasks` & `/speckit-analyze`)**: Produce dependency-ordered tasks in `tasks.md` where failing test tasks precede implementation tasks for every story.
-4. **Implement (`/speckit-implement`)**: Execute tasks strictly via Red-Green-Refactor, keeping commits atomic and ensuring `go vet ./...`, `go test ./...`, and applicable integration/frontend suites pass before marking a story complete.
+1. **Investigate & Right-Size (Pre-Specify Gate)**: Verify upstream library behavior, reference designs (`r42`), and current codebase state first; reject oversized scopes and split them into minimal single-responsibility slices before creating a spec.
+2. **Specify (`/speckit-specify` & `/speckit-clarify`)**: Define user/operator stories, deterministic invariants, failure/recovery cases, and measurable acceptance criteria in `specs/<###-feature>/spec.md`.
+3. **Plan (`/speckit-plan`)**: Resolve technical unknowns in `research.md`, define state machines and schemas in `data-model.md` and `contracts/`, and pass the **Constitution Check** gate in `plan.md`.
+4. **Tasks (`/speckit-tasks` & `/speckit-analyze`)**: Produce dependency-ordered, surgical tasks in `tasks.md` where failing test tasks precede implementation tasks for every story.
+5. **Implement (`/speckit-implement`)**: Execute tasks strictly via Red-Green-Refactor, keeping commits atomic and ensuring `go vet ./...`, `go test ./...`, and applicable integration/frontend suites pass before marking a story complete.
 
 ## Governance
 
-This Constitution supersedes ad-hoc conventions and generic template defaults across the repository. Every specification, implementation plan, task list, and code review MUST verify compliance with Principles I–V; any architectural exception MUST be explicitly justified in the `Complexity Tracking` table of the feature's `plan.md` and approved by the human maintainer.
+This Constitution supersedes ad-hoc conventions and generic template defaults across the repository. Every specification, implementation plan, task list, and code review MUST verify compliance with Principles I–VI; any architectural exception MUST be explicitly justified in the `Complexity Tracking` table of the feature's `plan.md` and approved by the human maintainer.
 
 Amendments to this Constitution require explicit user approval, an updated Sync Impact Report during review, alignment updates to `AGENTS.md` if workflow rules change, and a semantic version bump:
 
@@ -64,4 +72,4 @@ Amendments to this Constitution require explicit user approval, an updated Sync 
 
 Runtime guidance for AI coding agents is maintained in `AGENTS.md` at the repository root and MUST stay consistent with this Constitution.
 
-**Version**: 1.0.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
+**Version**: 1.1.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
