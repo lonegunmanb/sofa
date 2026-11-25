@@ -3,6 +3,7 @@ package spec
 import (
 	"testing"
 
+	"github.com/lonegunmanb/golden"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -72,4 +73,11 @@ func TestValidateBranchName(t *testing.T) {
 func TestNewBranchRefValidatesKnownBranchName(t *testing.T) {
 	_, err := NewBranchRef(cty.StringVal("bad..branch"), `"bad..branch"`)
 	require.ErrorContains(t, err, "branch")
+}
+
+func TestNewBranchRefRetainsSensitiveMark(t *testing.T) {
+	value := cty.StringVal("main").Mark(golden.SensitiveMark)
+	ref, err := NewBranchRef(value, "var.sensitive_branch")
+	require.NoError(t, err)
+	require.True(t, ref.Value.HasMarkDeep(golden.SensitiveMark))
 }

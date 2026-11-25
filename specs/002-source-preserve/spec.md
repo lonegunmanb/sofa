@@ -68,7 +68,7 @@ A workflow author omits `preserve.url` when the root has exactly one source. Pla
 - Credential-reference names are validated syntactically but their values are never read during offline planning.
 - An unknown branch remains deferred without being converted to an empty string.
 - A preserve URL must be known during planning even when its branch is unknown.
-- Unsupported attributes, unsupported nested blocks, `for_each`, and multiple labels are rejected.
+- Unsupported attributes, unsupported nested blocks, and multiple labels are rejected; collection expansion is delegated to the planning engine.
 - Explicit preserve URLs remain untouched by automatic source inference.
 - Source and preserve values remain deterministic across repeated plans.
 
@@ -96,7 +96,7 @@ A workflow author omits `preserve.url` when the root has exactly one source. Pla
 - **FR-018**: Omitted preserve URLs MUST fail as ambiguous when the root has multiple sources.
 - **FR-019**: Explicit preserve URLs MUST bypass automatic inference.
 - **FR-020**: Source and preserve planning MUST remain fully offline and perform no repository command or network call.
-- **FR-021**: Source and preserve declarations MUST reject unknown attributes, unsupported nested blocks, and unsupported collection expansion.
+- **FR-021**: Source and preserve declarations MUST reject unknown attributes and unsupported nested blocks; collection expansion remains delegated to the planning engine.
 
 ### Key Entities
 

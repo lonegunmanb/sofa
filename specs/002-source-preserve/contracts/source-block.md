@@ -11,7 +11,7 @@ source "<name>" {
 }
 ```
 
-The block has exactly one label. It supports the planning engine's standard `precondition` metadata and does not support `for_each`.
+The block has exactly one label and supports the planning engine's standard `precondition` metadata. Collection expansion is delegated to the planning engine.
 
 ## Validation
 

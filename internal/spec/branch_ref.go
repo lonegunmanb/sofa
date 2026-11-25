@@ -18,15 +18,15 @@ func NewBranchRef(value cty.Value, expression string) (BranchRef, error) {
 	if value == cty.NilVal {
 		return BranchRef{}, fmt.Errorf("branch must be a string")
 	}
-	value, _ = value.UnmarkDeep()
-	if value.IsNull() {
+	unmarked, _ := value.UnmarkDeep()
+	if unmarked.IsNull() {
 		return BranchRef{}, fmt.Errorf("branch must not be null")
 	}
-	if !value.Type().Equals(cty.String) {
-		return BranchRef{}, fmt.Errorf("branch must be a string, got %s", value.Type().FriendlyName())
+	if !unmarked.Type().Equals(cty.String) {
+		return BranchRef{}, fmt.Errorf("branch must be a string, got %s", unmarked.Type().FriendlyName())
 	}
-	if value.IsWhollyKnown() {
-		if err := ValidateBranchName(value.AsString()); err != nil {
+	if unmarked.IsWhollyKnown() {
+		if err := ValidateBranchName(unmarked.AsString()); err != nil {
 			return BranchRef{}, err
 		}
 	}

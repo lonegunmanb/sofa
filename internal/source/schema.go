@@ -116,9 +116,6 @@ func (s *SourceBlock) AddressLength() int      { return 2 }
 func (s *SourceBlock) CanExecutePrePlan() bool { return false }
 
 func (s *SourceBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalContext) error {
-	if _, exists := block.Body.Attributes["for_each"]; exists {
-		return fmt.Errorf("source %q does not support for_each", s.Name())
-	}
 	for _, attributeName := range []string{"url", "branch"} {
 		attribute, exists := block.Body.Attributes[attributeName]
 		if !exists {
@@ -210,18 +207,13 @@ func (p *PreserveBlock) Decode(block *golden.HclBlock, ctx *hcl.EvalContext) err
 	p.Branch = specpkg.BranchRef{}
 	p.planned = cty.NilVal
 
-	allowedAttributes := map[string]struct{}{
-		"branch":     {},
-		"url":        {},
-		"depends_on": {},
-	}
 	for name := range block.Body.Attributes {
-		if _, allowed := allowedAttributes[name]; !allowed {
+		if name != "url" && name != "branch" && !golden.MetaAttributeNames.Contains(name) {
 			return fmt.Errorf("preserve %q contains unknown attribute %q", p.Name(), name)
 		}
 	}
 	for _, nested := range block.NestedBlocks() {
-		if nested.Type != "precondition" {
+		if !golden.MetaNestedBlockNames.Contains(nested.Type) {
 			return fmt.Errorf("preserve %q contains unsupported nested block %q", p.Name(), nested.Type)
 		}
 	}

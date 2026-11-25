@@ -99,6 +99,27 @@ func TestLoadDirectoryContextKeepsAlreadyAbsolutePaths(t *testing.T) {
 	require.Equal(t, filepath.Clean(filePath), filepath.Clean(loaded.Files[0].Path))
 }
 
+func TestLoadDirectoryContextDoesNotApplyRootDefaultsOrHideSyntaxErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "a-preserve.sofa.hcl"), `
+preserve "delivery" {
+  branch = "release/v1"
+}
+`)
+	writeTestFile(t, filepath.Join(dir, "b-bad-source.sofa.hcl"), `
+source "project" {
+  url =
+}
+`)
+
+	loaded, diags, err := LoadDirectoryContext(context.Background(), dir)
+	require.NoError(t, err)
+	require.True(t, diags.HasErrors())
+	require.Contains(t, diags.Error(), "b-bad-source.sofa.hcl")
+	require.Len(t, loaded.Blocks, 1)
+	require.Equal(t, "preserve", loaded.Blocks[0].Type)
+}
+
 func TestLoadDirectoryContextIsDeterministic(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "c.sofa.hcl"), `variable "c" { type = string }`)

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/sofa/internal/config"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +24,13 @@ preserve "delivery" {
 `)
 
 	cfg := newTestPlanner(t, dir, nil)
-	initPlanner(t, cfg, dir)
+	originalBlocks := loadDefaultTestBlocks(t, dir)
+	require.NoError(t, cfg.Init(originalBlocks))
+	for _, block := range originalBlocks {
+		if block.Type == "preserve" {
+			require.NotContains(t, block.Body.Attributes, "url")
+		}
+	}
 	require.NoError(t, cfg.RunPlan())
 
 	value := cfg.EvalContext().Variables["preserve"].GetAttr("delivery")
@@ -41,7 +48,9 @@ preserve "delivery" {
 }
 `)
 
-	_, _, err := config.LoadDirectoryContext(context.Background(), dir)
+	blocks := loadDefaultTestBlocks(t, dir)
+	cfg := newTestPlanner(t, dir, nil)
+	err := cfg.Init(blocks)
 	require.ErrorContains(t, err, `preserve "delivery" omits url`)
 	require.ErrorContains(t, err, "no source block")
 }
@@ -64,7 +73,9 @@ preserve "delivery" {
 }
 `)
 
-	_, _, err := config.LoadDirectoryContext(context.Background(), dir)
+	blocks := loadDefaultTestBlocks(t, dir)
+	cfg := newTestPlanner(t, dir, nil)
+	err := cfg.Init(blocks)
 	require.ErrorContains(t, err, `preserve "delivery" omits url`)
 	require.ErrorContains(t, err, "multiple source blocks")
 	require.ErrorContains(t, err, "first")
@@ -100,4 +111,12 @@ preserve "delivery" {
 	require.NoError(t, err)
 	require.Contains(t, ancestors, "source.second")
 	require.NotContains(t, ancestors, "source.first")
+}
+
+func loadDefaultTestBlocks(t *testing.T, dir string) []*golden.HclBlock {
+	t.Helper()
+	loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
+	require.NoError(t, err)
+	require.False(t, diags.HasErrors(), diags.Error())
+	return loaded.Blocks
 }

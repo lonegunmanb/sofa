@@ -88,7 +88,6 @@ func LoadDirectoryContext(ctx context.Context, directory string) (Loaded, hcl.Di
 	loaded.Files = sourceFiles
 
 	var diags hcl.Diagnostics
-	var parsedFiles []ParsedFile
 	for _, sourceFile := range sourceFiles {
 		if err := ctx.Err(); err != nil {
 			return loaded, diags, err
@@ -139,21 +138,9 @@ func LoadDirectoryContext(ctx context.Context, directory string) (Loaded, hcl.Di
 			continue
 		}
 
-		parsedFiles = append(parsedFiles, ParsedFile{
-			Path:   sourceFile.Path,
-			Syntax: syntaxBody,
-			Write:  writeFile.Body(),
-		})
-	}
-
-	if err := runRootDefaultsHook(&RootModule{Files: parsedFiles}); err != nil {
-		return loaded, diags, err
-	}
-
-	for _, parsedFile := range parsedFiles {
 		loaded.Blocks = append(
 			loaded.Blocks,
-			golden.AsHclBlocks(parsedFile.Syntax.Blocks, parsedFile.Write.Blocks())...,
+			golden.AsHclBlocks(syntaxBody.Blocks, writeFile.Body().Blocks())...,
 		)
 	}
 

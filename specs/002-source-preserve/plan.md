@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add two offline planning blocks. `source "<name>"` validates a repository URL, branch, and optional credential-reference names. `preserve "<name>"` accepts known or deferred string branches while retaining the original expression. A planner-owned pre-adaptation hook resolves omitted preserve URLs only when the root has exactly one source, injecting a real traversal into both HCL AST representations so golden builds the required dependency edge.
+Add two offline planning blocks. `source "<name>"` validates a repository URL, branch, and optional credential-reference names. `preserve "<name>"` accepts known or deferred string branches while retaining the original expression. `SofaConfig.Init` resolves omitted preserve URLs only when the root has exactly one source, rebuilding the affected block with a real traversal in fresh syntax and write ASTs so golden builds the required dependency edge.
 
 ## Technical Context
 
@@ -42,7 +42,7 @@ Add two offline planning blocks. `source "<name>"` validates a repository URL, b
 ```text
 internal/
 ├── config/
-│   ├── loader.go                  # generic pre-adaptation hook and raw module transport
+│   ├── loader.go                  # pure directory loading, no Root defaults
 │   └── loader_test.go
 ├── spec/
 │   ├── branch_ref.go
@@ -57,18 +57,15 @@ internal/
     └── preserve_test.go
 ```
 
-**Structure Decision**: `internal/spec` owns reusable branch-reference validation. `internal/source` owns source/preserve models and HCL decoding. `internal/planner/defaults.go` owns the source-to-preserve singleton rule and traversals. `internal/config` exposes only a generic raw-module hook so business semantics do not enter the low-level package.
+**Structure Decision**: `internal/spec` owns reusable branch-reference validation. `internal/source` owns source/preserve models and HCL decoding. `internal/planner/defaults.go` owns the source-to-preserve singleton rule and fresh block reconstruction. `internal/config` remains a pure loader with no Root singleton behavior.
 
 ## Design Decisions
 
-### Pre-adaptation hook
+### Init-time block reconstruction
 
-`LoadDirectoryContext` parses each file into syntax and write bodies, then invokes an optional generic `RootDefaultsHook` before calling `golden.AsHclBlocks`. Planner package initialization registers the only hook. The hook mutates matching blocks in both ASTs:
+`SofaConfig.Init` applies Root defaults before `golden.InitConfig`. For an omitted preserve URL, it clones the syntax block, builds a fresh hclwrite block by copying existing attribute tokens and nested blocks, then injects the inferred traversal into both. `golden.NewHclBlock` produces a new block, leaving `Loaded.Blocks` untouched.
 
-- syntax: adds a `ScopeTraversalExpr`;
-- write: calls `SetAttributeRaw` with `TokensForTraversal`.
-
-This preserves real dependency discovery and avoids trying to manipulate golden's unexported write-block handle after adaptation.
+This preserves real dependency discovery, avoids private golden state, keeps `sofa schema` and child-module loading free of Root singleton errors, and supports later Root defaults for sandbox and providers.
 
 ### Source block
 
@@ -80,7 +77,7 @@ This preserves real dependency discovery and avoids trying to manipulate golden'
 
 ## Post-Design Constitution Check
 
-All gates remain PASS. The generic config hook keeps dependency direction one-way: `planner -> source -> spec`; `config` imports none of them.
+All gates remain PASS. Dependency direction remains one-way: `planner -> source -> spec`; `config` imports none of them and performs no Root singleton inference.
 
 ## Complexity Tracking
 

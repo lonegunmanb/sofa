@@ -36,7 +36,6 @@ var registerBlocksOnce sync.Once
 
 func init() {
 	RegisterBlocks()
-	config.RegisterRootDefaultsHook(applyRootDefaults)
 }
 
 // RegisterBlocks installs every sofa block type before HCL blocks are adapted.
@@ -77,10 +76,14 @@ func NewSofaConfig(args ConfigArgs) *SofaConfig {
 // Init validates sofa-specific declaration prerequisites and delegates graph
 // construction and pre-plan work to golden.
 func (c *SofaConfig) Init(blocks []*golden.HclBlock) error {
-	if err := c.scanVariableDeclarations(blocks); err != nil {
+	preparedBlocks, err := applyRootDefaults(blocks)
+	if err != nil {
 		return err
 	}
-	return golden.InitConfig(c, blocks)
+	if err := c.scanVariableDeclarations(preparedBlocks); err != nil {
+		return err
+	}
+	return golden.InitConfig(c, preparedBlocks)
 }
 
 func (c *SofaConfig) scanVariableDeclarations(blocks []*golden.HclBlock) error {

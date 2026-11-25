@@ -112,15 +112,6 @@ func TestSourceRejectsUnsupportedSchema(t *testing.T) {
 }`,
 			want: "unsupported",
 		},
-		{
-			name: "for_each",
-			body: `source "project" {
-  for_each = toset(["project"])
-  url      = "https://github.com/example/repo.git"
-  branch   = "main"
-}`,
-			want: "for_each",
-		},
 	}
 
 	for _, tt := range tests {

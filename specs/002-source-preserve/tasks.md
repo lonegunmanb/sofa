@@ -91,14 +91,14 @@ description: "Task list for Source Repositories and Preserved Branches"
 
 ### Tests for User Story 3
 
-- [X] T014 [P] [US3] Write failing loader-hook tests proving the hook runs before block adaptation and can mutate both syntax and write bodies in `internal/config/loader_test.go`.
+- [X] T014 [P] [US3] Write failing loader tests proving Root defaults are not applied during directory loading and real syntax diagnostics remain visible in `internal/config/loader_test.go`.
 - [X] T015 [P] [US3] Write failing root-default matrix tests and dependency assertions in `internal/planner/defaults_test.go`, covering `data-model.md` entity `RootSourceSet.sources`.
 
 ### Implementation for User Story 3
 
-- [X] T016 [US3] Add the generic raw-module pre-adaptation hook to `internal/config/loader.go` without importing source, planner, or business block packages.
-- [X] T017 [US3] Implement `applyPreserveURLDefaults` in `internal/planner/defaults.go`, injecting `ScopeTraversalExpr` plus `hclwrite.TokensForTraversal` for exactly one source.
-- [X] T018 [US3] Register the root-default hook from `internal/planner` package initialization and make `SofaConfig.Init` apply defaults before `golden.InitConfig`.
+- [X] T016 [US3] Keep `internal/config/loader.go` free of Root singleton behavior and business block dependencies.
+- [X] T017 [US3] Implement `applyRootDefaults` in `internal/planner/defaults.go`, rebuilding affected blocks with `golden.CloneHclSyntaxBlock`, `golden.NewHclBlock`, and both syntax/write traversals.
+- [X] T018 [US3] Make `SofaConfig.Init` apply Root defaults to a fresh block slice before `golden.InitConfig`, leaving `Loaded.Blocks` unchanged.
 - [X] T019 [US3] Run the 0/1/≥2 matrix, explicit-URL, dependency-edge, and repeated-plan tests; fix only implementation defects.
 
 **Checkpoint**: All three stories pass, including the singleton graph edge.
