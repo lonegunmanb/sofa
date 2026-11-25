@@ -88,11 +88,12 @@ sofa/
   - `1` 个时：注入引用表达式，`golden` 的 `dagWalker` 会**自动建立隐式依赖边**并完成求值；
   - `≥ 2` 个时：直接返回歧义错误，要求用户显式书写。
 
-### 铁律 7：每个分片的完成门禁
-每个分片在按 Spec Kit（`specify` → `plan` → `tasks` → `implement`）交付时，必须满足：
+### 铁律 7：每个分片的完成门禁（含强制 Commit & Push！）
+每个分片在按 Spec Kit（`specify` → `plan` → `tasks` → `implement`）交付时，必须严格按序满足以下全部条件后，**才允许声明本分片完成或进入下一分片**：
 1. 先写失败单测（Red），验证预期失败信息后再写最小实现（Green）；
-2. 通过 `go vet ./...` 与 `go test ./... -count=1`；
-3. 不破坏前序分片的任何已有测试。
+2. 通过 `gofmt` 检查、`go vet ./...` 与 `go test ./... -count=1`；
+3. 不破坏前序分片的任何已有测试；
+4. **强制提交并推送（Commit & Push）**：将当前分片产生的全部规范与代码文件（`specs/<###-...>/`、`internal/`、`cmd/`、`go.mod`、`go.sum` 等，注意排除未跟踪的编辑器私有目录）执行 `git add` → `git commit` → `git push`，并确认 `git status` 工作区干净后，才能继续开启下一个分片。严禁把多个分片的改动堆积在未提交工作区中！
 
 ---
 

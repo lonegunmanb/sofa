@@ -24,6 +24,7 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
   - `speckit-plan` — produce `plan.md`, `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
   - `speckit-tasks` / `speckit-analyze` — generate TDD-ordered `tasks.md` and verify cross-artifact alignment
   - `speckit-implement` — execute `tasks.md`
+- **Per-Slice Commit & Push Gate (NON-NEGOTIABLE)**: Every time a feature slice is completed and passes `gofmt`, `go vet ./...`, and `go test ./... -count=1` (plus any applicable Tier 2 / frontend tests), the agent MUST stage all slice artifacts (`specs/<###-feature>/`, source/test files, `go.mod`/`go.sum`), create an atomic `git commit`, and `git push` to the remote repository (`git status` MUST be clean) **before** starting the next slice. Never stack multiple uncommitted slices in the working tree.
 - **Tooling Paths (Windows)**:
   - Specify CLI: `C:\Users\hezijie\.local\bin\specify.exe` (or `specify` if on `PATH`)
   - Helper scripts: `.specify/scripts/powershell/*.ps1`

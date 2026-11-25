@@ -58,7 +58,8 @@ Before committing to, specifying, or accepting any feature slice or implementati
 2. **Specify (`/speckit-specify` & `/speckit-clarify`)**: Define user/operator stories, deterministic invariants, failure/recovery cases, and measurable acceptance criteria in `specs/<###-feature>/spec.md`.
 3. **Plan (`/speckit-plan`)**: Resolve technical unknowns in `research.md`, define state machines and schemas in `data-model.md` and `contracts/`, and pass the **Constitution Check** gate in `plan.md`.
 4. **Tasks (`/speckit-tasks` & `/speckit-analyze`)**: Produce dependency-ordered, surgical tasks in `tasks.md` where failing test tasks precede implementation tasks for every story.
-5. **Implement (`/speckit-implement`)**: Execute tasks strictly via Red-Green-Refactor, keeping commits atomic and ensuring `go vet ./...`, `go test ./...`, and applicable integration/frontend suites pass before marking a story complete.
+5. **Implement (`/speckit-implement`)**: Execute tasks strictly via Red-Green-Refactor, keeping commits atomic and ensuring `gofmt`, `go vet ./...`, `go test ./...`, and applicable integration/frontend suites pass before marking a story complete.
+6. **Commit & Push Gate (Per-Slice Closure)**: Upon completing a slice and passing all quality checks, contributors MUST commit all specification, implementation, and test changes for that slice and `git push` them to the remote repository (verifying a clean working tree) before initiating the next slice.
 
 ## Governance
 
@@ -72,4 +73,4 @@ Amendments to this Constitution require explicit user approval, an updated Sync 
 
 Runtime guidance for AI coding agents is maintained in `AGENTS.md` at the repository root and MUST stay consistent with this Constitution.
 
-**Version**: 1.1.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
+**Version**: 1.2.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
