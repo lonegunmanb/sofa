@@ -159,6 +159,23 @@ worker "implement" {
 
 例如，“保存通知偏好”和“发送前检查偏好”可以分开审查。后一项不仅要证明关闭后不发送，还要验证开启时仍会发送。QC 失败就带着测试记录返工；通过后，人类审查该候选的小范围变更，再以获批提交为下一项的基线。
 
+### 按上游结果生成工序
+
+如果验收项的数量只有在上游完成后才知道，可以声明 `dynamic_worker`。例如，上游 `worker.discover` 检查代码，将受影响的邮件类型及其验收条件作为映射 `output.checks` 发布。下面的 `dynamic "worker"` 用 `for_each` 遍历该映射：每个条目生成一个独立的 `worker`，空映射则不生成任何节点或分支。
+
+```hcl
+dynamic_worker "verify_notifications" {
+  dynamic "worker" {
+    for_each = worker.discover.output.checks
+    iterator = check
+    content {
+      based_source = worker.discover.work_branch
+      prompt       = "验证 ${check.key} 类型的邮件是否满足以下条件：${check.value}。运行对应测试并记录结果。"
+    }
+  }
+}
+```
+
 ## 可观测与追溯
 
 数据按 Run、节点、Session 和执行轮次组织，并按日志级别记录输入、模型响应、工具调用、命令执行、测试输出和状态变化。日记、人工决策和发布记录也是正式数据。
