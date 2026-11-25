@@ -37,7 +37,7 @@ Standalone local-directory mode and distributed Dapr Actor mode MUST share ident
 
 Before committing to, specifying, or accepting any feature slice or implementation task, contributors MUST:
 
-- **Investigate Before Deciding**: Inspect actual source code and capabilities of upstream dependencies (`golden`, `copilot-sdk/go`, `dapr/go-sdk`), reference implementations (`r42`), and the existing repository first. Scoping a task on assumptions or re-implementing capabilities already provided by dependencies is prohibited.
+- **Investigate Before Deciding**: Inspect actual source code and capabilities of upstream dependencies (`golden`, `copilot-sdk/go`, `dapr/go-sdk`), reference implementations (`r42`), and the existing repository first. Scoping a task on assumptions or re-implementing capabilities already provided by dependencies is prohibited. In particular, capabilities natively provided by `golden` (block decoding, `variable`/`locals`, `for_each`, `depends_on`, `precondition`, `dynamic`, sensitivity marks, and DAG construction/traversal) MUST NEVER be re-implemented, wrapped in redundant checks, or manually intercepted without explicit prior approval from the human maintainer.
 - **Reject Oversized Scopes**: Every feature slice (`specs/<###-feature>/`) and every task in `tasks.md` MUST be small, single-purpose, and independently verifiable. Contributors MUST proactively push back on and split any proposed spec, plan, or task that bundles multiple subsystems, multiple unrelated HCL block families, or broad cross-cutting concerns before proceeding to `/speckit-specify` or implementation.
 
 ## Technology Stack & Architectural Constraints
@@ -73,4 +73,4 @@ Amendments to this Constitution require explicit user approval, an updated Sync 
 
 Runtime guidance for AI coding agents is maintained in `AGENTS.md` at the repository root and MUST stay consistent with this Constitution.
 
-**Version**: 1.2.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
+**Version**: 1.3.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25

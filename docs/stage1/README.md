@@ -54,18 +54,22 @@ sofa/
 
 以下全部来自 `golden` 源码的硬约束，写错任意一条都会导致隐蔽 Bug 或编译/运行期 Panic：
 
-### 铁律 1：禁止自己写 HCL 块解码器或 DAG 拓扑排序器
-- 必须直接调用 `golden.AsHclBlocks(syntaxBody.Blocks, writeFile.Body().Blocks())`、`golden.InitConfig(cfg, blocks)` 和 `cfg.RunPlan()`。
-- `variable`（含 `SOFA_VAR_<name>`、`sofa.sofavars`、`*.auto.sofavars`、CLI `-var`、嵌套 `validation`）和 `locals` 已由 `golden` 内置注册，**绝不要自己重复注册 `VariableBlock` 或 `LocalBlock`**！只需在 `NewBaseConfigArgs` 中设置 `DslFullName: "sofa"`、`DslAbbreviation: "sofa"`。
+### 铁律 1：绝对禁止重造或手工拦截 `golden` 已提供的能力（未经用户显式批准严禁违反！）
+- **`golden` 原生提供的能力一律直接委托，绝不允许在 `sofa` 中重复实现、包裹冗余校验、或手写代码去禁用/拦截**：
+  - 块适配与解码：`golden.AsHclBlocks`、`golden.InitConfig`、`golden.Decode`（普通块直接用 `hcl:"..."` 标签交由 `golden.Decode` 自动完成未知属性与未知嵌套块报错，无需手写属性名白名单）；
+  - 内置 `variable`（含 `SOFA_VAR_<name>`、`sofa.sofavars`、`*.auto.sofavars`、CLI `-var`、类型转换、嵌套 `validation`）和 `locals`：**绝不要重复注册或重写求值器**（`sofa` 仅在 `Init` 前检查 `variable` 必填具体 `type` 及记录 `sensitive` 标记）；
+  - 元属性与元嵌套块：`for_each`、`depends_on`（`golden.MetaAttributeNames`）以及 `precondition`、`dynamic`（`golden.MetaNestedBlockNames`）均由 `golden` 原生处理——**严禁在任何普通块中手写代码去报错拦截 `for_each`、`depends_on`、`precondition` 或 `dynamic`！** 即便某个块因为字段可能含 `cty.UnknownVal` 而必须实现 `golden.CustomDecode`（如 `preserve`、`worker`、`merge`、`module`），过滤元属性/元嵌套块时也**必须直接复用 `golden.MetaAttributeNames.Contains(...)` 与 `golden.MetaNestedBlockNames.Contains(...)`**，不得手写硬编码列表。
+  - **全仓库唯一经用户批准的特例**：仅有分片 `006` 的 `dynamic_worker` 因 `for_each` 遍历上游运行期未知值（`cty.UnknownVal`）且需支持 `iterator` 变量名（对齐 `r42` 的 `dynamic_research`），才在 `CustomDecode` 中专门解析 `dynamic "worker"`。
+  - DAG 建图、环检测与拓扑执行：完全交由 `InitConfig` 与 `cfg.RunPlan()` 完成。
 
 ### 铁律 2：`go-defaults` 并发初始化竞态防护与测试并行度
 - `golden` 依赖的 `github.com/lonegunmanb/go-defaults v1.4.0` 首次调用存在非线程安全懒加载。在全局 `sync.Once` 注册自定义 `golden.RegisterBlock(...)` 前，**第一行必须先调用一次 `defaults.SetDefaults(&struct{}{})`**。
 - `golden` 的块注册表与环境变量读取是进程级全局状态：涉及 `SOFA_VAR_*` 环境变量的单测严禁加 `t.Parallel()`（使用 `t.Setenv`）。
 
-### 铁律 3：单标签块（`Type() == ""`）的 `SingleValueBlock` vs `Valuable` 陷阱
+### 铁律 3：单标签块（`Type() == ""`）的 `SingleValueBlock` vs `Valuable` 选型规则
 - 在 `sofa` 中，所有顶层业务块在 HCL 中都是 **1 个标签**（如 `source "project"`、`worker "specify"`），因此它们的 `Type()` 方法必须返回 `""`，`AddressLength()` 必须返回 `2`（`golden.AsHclBlocks` 会自动为其补齐前置空标签 `Labels = ["", name]`）。
-- **不支持 `for_each` 的 1 标签块**（`output`、`source`、`preserve`、`sandbox`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`dynamic_worker`、`merge`、`module`）：实现 `golden.SingleValueBlock`（`Value() cty.Value`），`golden` 会自动把它们放到 `EvalContext.Variables[blockType][name]`。
-- **支持 `for_each` 的 1 标签块**（`worker "<name>"`）：**不能**实现 `SingleValueBlock`，必须实现 `golden.Valuable`（`Values() map[string]cty.Value`）。此时 `golden` 内部会多包一层空子类型键 `""`（变成 `Variables["worker"].GetAttr("")`）！因此**必须在 `SofaConfig.EvalContext()` 中解包**：
+- **按单实例对象暴露的 1 标签块**（`output`、`source`、`preserve`、`sandbox`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`dynamic_worker`、`merge`、`module`）：实现 `golden.SingleValueBlock`（`Value() cty.Value`），`golden` 会自动把它们放到 `EvalContext.Variables[blockType][name]`（注意：保持与 `r42` 一致，元语法交由 `golden` 默认处理，**不要手写拦截 `for_each` 的代码**）。
+- **需要按多实例映射暴露 `for_each` 的 1 标签块**（`worker "<name>"`）：**不能**实现 `SingleValueBlock`，必须实现 `golden.Valuable`（`Values() map[string]cty.Value`）。此时 `golden` 内部会多包一层空子类型键 `""`（变成 `Variables["worker"].GetAttr("")`）！因此**必须在 `SofaConfig.EvalContext()` 中解包**：
   ```go
   if v, ok := ctx.Variables["worker"]; ok && !v.IsNull() && v.Type().IsObjectType() && v.Type().HasAttribute("") {
       ctx.Variables["worker"] = v.GetAttr("")

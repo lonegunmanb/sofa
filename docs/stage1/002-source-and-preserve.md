@@ -42,7 +42,7 @@ source "project" {
   - `token_ref`（可选，Plan 期已知非空 `string`）：环境变量名（符合 `^[A-Za-z_][A-Za-z0-9_]*$`）；Plan 期**只校验变量名格式，绝不读取宿主机环境变量**（因为离线本机 Plan 环境未必配了服务端才有的密钥）。
   - `ssh_key_ref`（可选，Plan 期已知非空 `string`）：环境变量名，格式要求同上。
   - **互斥约束**：`token_ref` 与 `ssh_key_ref` 至多设置一个，同时非空时 Plan 报错。
-  - 禁止任何未知属性或非元嵌套块（仅允许 `precondition`）。
+  - 未知属性与未知嵌套块校验直接委托给 `golden.Decode`（`gohcl`），**不要手写拦截 `for_each`、`depends_on`、`precondition`、`dynamic` 等 `golden` 元语法**。
 - **`Value() cty.Value` 对外暴露结构**：
   ```go
   cty.ObjectVal(map[string]cty.Value{
