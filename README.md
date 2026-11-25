@@ -120,6 +120,41 @@ checkpoint {
 - **手动重跑：** 可针对运行中或报错节点；必须隔离旧执行，并处理受影响的下游结果。
 - **删除任务：** 停止并隔离残留执行，清理任务所属资源，同时保留声明为永久保存的分支。
 
+## 示例：从规格到代码
+
+下面把 Anil Bapat 的[规格驱动开发工作流](https://www.linkedin.com/pulse/spec-driven-development-smarter-way-build-ai-anil-bapat-ern7c/)映射为四个 `worker`。以“用户可以关闭邮件通知”为例，先确认用户可观察的行为，再决定如何实现。以下是伪代码，不是可执行 HCL；`human_review` 表示等待人类明确批准，并返回获批的版本。
+
+```text
+worker "specify" {
+  spec = write("spec.md", var.requirement, "谁可以关闭通知？关闭后哪些邮件不再发送？")
+  output = human_review(spec)
+}
+
+worker "plan" {
+  plan = write("plan.md", worker.specify.output, "设计偏好存储、发送前的检查及测试方案")
+  output = human_review(plan)
+}
+
+worker "tasks" {
+  tasks = write("tasks.md", worker.plan.output, "按依赖拆成小任务，为每项列出验收条件")
+  output = human_review(tasks)
+}
+
+worker "implement" {
+  base = source.project.commit_sha
+  for task in dependency_order(worker.tasks.output):
+    candidate = implement_task(base, task)
+    evidence = qc(candidate, task.acceptance_tests)
+    while not evidence.passed:
+      candidate = revise(candidate, evidence)
+      evidence = qc(candidate, task.acceptance_tests)
+    base = human_review(candidate, evidence).commit_sha
+  publish(base)
+}
+```
+
+例如，“保存通知偏好”和“发送前检查偏好”可以分开审查。后一项不仅要证明关闭后不发送，还要验证开启时仍会发送。QC 失败就带着测试记录返工；通过后，人类审查该候选的小范围变更，再以获批提交为下一项的基线。
+
 ## 可观测与追溯
 
 数据按 Run、节点、Session 和执行轮次组织，并按日志级别记录输入、模型响应、工具调用、命令执行、测试输出和状态变化。日记、人工决策和发布记录也是正式数据。
