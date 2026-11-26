@@ -10,7 +10,7 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 4. **Pre-Designed Slice Blueprints**:
    - **Stage 1 (Completed)**: `docs/stage1/README.md`, `docs/stage1/001-*.md` through `009-*.md`, and `004b-harness-and-sandbox-bridge.md`.
    - **Stage 2 (Detailed Blueprints)**: `docs/stage2/README.md` and `docs/stage2/010-*.md` through `020-*.md` (MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 2 slice).
-   - **Stage 3 (Outline)**: `docs/stage3/README.md` (`021`–`027` distributed Dapr control plane, S3 `BlobStore`, REST/WS API, CLI `apply`, and Vue 3 dashboard).
+   - **Stage 3 (Outline)**: `docs/stage3/README.md` (`021`–`028` distributed Dapr control plane, S3 `BlobStore`, REST/WS API, CLI `apply`, Vue 3 dashboard, and `examples/` dogfooding templates).
 5. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)

@@ -21,10 +21,12 @@
    - 暴露 `/api/v1/runs`、`/nodes`、`/decisions`、`/artifacts` 与基于 Dapr PubSub 的 `/api/v1/ws` 实时流；
    - 扩展 `cmd/sofa` 交付 `sofa apply <.sofaplan>`、`sofa runs`、`sofa pause/resume/rerun/delete`、`sofa decisions`；
    - 构建 `web/`（Vue 3 + TypeScript + Vite，Vitest TDD）：提供 DAG 状态视图、节点轮次/日记/日志/检查点追踪、人工插话、决策卡片审批，以及强制不带 `allow-same-origin` 的 `<iframe sandbox="allow-scripts">` + CSP 隔离材料预览。
+5. **开箱即用 `examples/` 模式库与 `copilot + antigravity` 自举模板**：
+   - 新增顶层 `examples/` 目录收录核心工程编排模式（含 **`copilot` 作为编码 Worker + 确定性 `gatekeeper` + 独立只读容器 `antigravity` 作为异构 QC 审查员** 的自举切片开发模板、上游设计 `fallback` 返工模板、`dynamic_worker` 扇出 + `merge` 串行合入模板），并通过自动化单测对全部示例执行 `sofa plan` 编译校验防止示例腐烂。
 
 ---
 
-## 2. 阶段三拟议微切片概要（`021`–`027`）
+## 2. 阶段三拟议微切片概要（`021`–`028`）
 
 | 切片编号 | 切片主题 | 核心职责概要 | 前置依赖 |
 | :--- | :--- | :--- | :--- |
@@ -35,6 +37,7 @@
 | **025** | **`RunActor`、`OperatorActor` 与单机 `daprd` 同构引导** | 全量 Run 索引与冷启动恢复；毫秒级非阻塞拓扑推进、延迟表达式求值、`dynamic_worker` 展开固化、嵌套 `module`、`fallback` 级联 `epoch` 重跑、`planned`/`immediate` 暂停、Run 结束/删除时按账本清理中间 Git 分支与 `BlobStore` 临时对象；单机 `daprd` 启停托管 | 021, 023, 024 |
 | **026** | **统一 REST + WebSocket API 服务与 `sofa apply` / 运维 CLI** | `/api/v1/*` 幂等 REST 端点、Dapr PubSub 驱动的 `/api/v1/ws` 实时流，以及 `sofa apply`、`sofa runs`、`sofa pause/resume/rerun/delete`、`sofa decisions` CLI 命令 | 025 |
 | **027** | **Vue 3 安全看板与人工决策工作台（`web/`）** | Vite + Vue 3 + TypeScript 前端工程（Vitest + Vue Test Utils TDD），实现 DAG 可视化、节点日记/检查点/日志追踪、人工插话、决策卡片审批与无 `allow-same-origin` 沙箱 `iframe` 材料预览 | 026 |
+| **028** | **`examples/` 经典编排模式库与 `copilot + antigravity` 自举模板** | 提供自举开发模板（`copilot` 编码 Worker + `gofmt`/`go vet`/`go test` `gatekeeper` + 独立只读容器 `antigravity` QC 互审）、`fallback` 返工模板、`dynamic_worker` + `merge` 模板，并附带 `sofa plan` 自动化校验测试 | 026 |
 
 ---
 
@@ -45,6 +48,7 @@ sofa/
 ├── cmd/
 │   ├── sofa/                               # [026] 扩展 apply / runs / pause / resume / rerun / delete / decisions
 │   └── sofa-worker/                        # [022] 宿主机工作进程守护入口（Dapr App + Actor Host）
+├── examples/                               # [028] 经典模式库（含 copilot Worker + antigravity 只读 QC 自举模板）
 ├── internal/
 │   ├── blob/s3/                            # [021] S3 / MinIO / OSS 兼容 BlobStore 实现
 │   ├── actor/                              # [022-025] OperatorActor / RunActor / NodeActor / MergeActor / ProcessRegistryActor
