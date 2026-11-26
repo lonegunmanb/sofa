@@ -1,0 +1,11 @@
+---
+description: "Stage 2 Slice 014 TDD tasks: harness.proto, buf stubs, pkg/harnessplugin, and containerized go-plugin AutoMTLS bridge"
+---
+
+# Tasks
+
+- [X] T001 Write canonical `proto/sofa/harness/v1/harness.proto`, `buf.yaml`, and `buf.gen.yaml`, and generate Go stubs (`pkg/harnessplugin/v1/`) and Python stubs (`plugins/sofa-harness-antigravity/src/sofa_harness_antigravity/proto/`).
+- [X] T002 [Red] Write failing Tier 1 tests in `internal/sandbox/runtime/podman_test.go` for `SessionMountLayout.HandshakeEnv` (allowing `SOFA_HARNESS_PLUGIN` & `PLUGIN_*` while rejecting business secrets like `OPENAI_API_KEY`) and in `internal/harness/runtime/bridge_test.go` (defining `testdata/loopbackplugin` local subprocess `AutoMTLS` + `SkipHostEnv: true` scenarios: env scrubbing, host env non-leakage, all 7 RPCs, concurrent 2x `InvokeHostTool` barrier sync, `PreToolUse` allow/deny + modified args + additional context, `PostToolUse` failure, `AbortTurn` interrupting blocked `RunTurn`, `*HarnessError` propagation, and rogue unauthenticated/self-signed TLS rejection).
+- [X] T003 [Green] Implement `HandshakeEnv` validation in `internal/sandbox/runtime/spec.go`, public plugin SDK in `pkg/harnessplugin/plugin.go`, and `internal/harness/runtime/` (`types.go`, `container_runner.go`, `client.go`, `testdata/loopbackplugin/main.go`) so `go test ./pkg/harnessplugin/... ./internal/sandbox/... ./internal/harness/... -count=1` passes.
+- [X] T004 [Red] Write failing Tier 2 real-Podman integration tests in `internal/harness/runtime/bridge_integration_test.go` (`//go:build integration`): cross-compile `testdata/loopbackplugin` (`CGO_ENABLED=0 GOOS=linux`), mount `:ro` at `/.sofa/harness` into `alpine:latest` via `ContainerRunner` (`--init --rm --entrypoint`), verify `AutoMTLS` `Capabilities`/`Open`/`RunTurn` (with host tool callback), verify `podman inspect` env contains zero business secrets, and verify container removal after `Close`.
+- [X] T005 [Green & Verify] Fix any container/port/TLS issues uncovered by Tier 2 tests until `go test -tags=integration ./internal/harness/runtime/... -count=1`, `gofmt -l .` (empty), `go vet ./...`, and `go test ./... -count=1` all pass, and mark all tasks `[X]`.

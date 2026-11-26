@@ -66,6 +66,7 @@ type SessionMountLayout struct {
 	HarnessDir        string
 	SessionStoreDir   string
 	PluginSocketDir   string
+	HandshakeEnv      []string
 }
 
 // ExecResult captures the stdout, stderr, and exit code of a container exec invocation.
@@ -288,6 +289,13 @@ func BuildRunArgs(layout SessionMountLayout) ([]string, error) {
 		"-e", "GIT_OPTIONAL_LOCKS=0",
 	}
 
+	for _, entry := range layout.HandshakeEnv {
+		if err := validateHandshakeEnvEntry(entry); err != nil {
+			return nil, err
+		}
+		args = append(args, "-e", entry)
+	}
+
 	if layout.Sandbox.Resources != nil {
 		if layout.Sandbox.Resources.CPUs != "" {
 			args = append(args, "--cpus", layout.Sandbox.Resources.CPUs)
@@ -437,4 +445,15 @@ func hasGlobMeta(seg string) bool {
 
 func isASCIIAlpha(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func validateHandshakeEnvEntry(entry string) error {
+	key, _, ok := strings.Cut(entry, "=")
+	if !ok || key == "" {
+		return fmt.Errorf("handshake env entry %q must be in KEY=VALUE format", entry)
+	}
+	if key != "SOFA_HARNESS_PLUGIN" && !strings.HasPrefix(key, "PLUGIN_") {
+		return fmt.Errorf("handshake env key %q is forbidden: only SOFA_HARNESS_PLUGIN and PLUGIN_* are permitted", key)
+	}
+	return nil
 }

@@ -1,0 +1,335 @@
+syntax = "proto3";
+
+package sofa.harness.v1;
+
+option go_package = "github.com/lonegunmanb/sofa/pkg/harnessplugin/v1;harnessv1";
+
+service AgentHarness {
+  // 1. Capability introspection handshake: returns plugin metadata and optional feature matrix for fast host pre-validation.
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+
+  // 2. Create or resume session by ID (aligned with r42 Factory.Open: returns ERROR_CATEGORY_SESSION_NOT_FOUND if resume_session_id does not exist).
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+
+  // 3. Execute a single turn (aligned with r42 Session.SendAndWait + On event stream + SessionHooks + sdk.Tool callbacks).
+  // At most one active RunTurn stream may exist per session_id at any moment; multi-turn conversations invoke RunTurn sequentially.
+  rpc RunTurn(stream HostTurnFrame) returns (stream PluginTurnFrame);
+
+  // 4. Out-of-band immediate abort of the current turn (aligned with r42 Session.Abort for StallWatchdog or immediate pause preemption).
+  rpc AbortTurn(AbortTurnRequest) returns (AbortTurnResponse);
+
+  // 5. In-place session reconnect/resume (aligned with r42 Session.Resume: reconnects the same session_id after AbortTurn and in-flight tool drain).
+  rpc ResumeSession(ResumeSessionRequest) returns (ResumeSessionResponse);
+
+  // 6. Read declared resource from an attached MCP Server (aligned with r42 ReadMCPResource, called by host sofa_read_mcp_resource after auth/quota checks).
+  rpc ReadMCPResource(ReadMCPResourceRequest) returns (ReadMCPResourceResponse);
+
+  // 7. Destroy and clean up session resources (aligned with r42 Session.Close / Disconnect).
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
+message GetCapabilitiesRequest {}
+
+message GetCapabilitiesResponse {
+  string harness_name = 1;
+  string harness_version = 2;
+  uint32 protocol_version = 3;
+  repeated string supported_provider_types = 4; // e.g. ["openai", "azure", "anthropic"]; empty means native provider only
+  bool supports_session_resume = 5;
+  bool supports_mcp_servers = 6;
+  bool supports_mcp_resources = 7;
+  bool supports_skills = 8;
+}
+
+// ---------------------------------------------------------------------------
+// OpenSession / ResumeSession / CloseSession
+// ---------------------------------------------------------------------------
+
+message OpenSessionRequest {
+  string session_id = 1;                  // Host-generated unique session ID (used when creating a new session)
+  string resume_session_id = 2;           // Non-empty prioritizes resuming an existing session (aligned with r42 ResumeSessionID)
+
+  string model = 3;                       // Required: model identifier
+  string profile = 4;                     // Optional: defaults to model when empty (aligned with r42 Profile)
+  string reasoning_effort = 5;            // Optional: "low" | "medium" | "high" etc.
+  string system_prompt = 6;               // Host-assembled system prompt (including protocol rules and built-in tool quota guidance)
+  string working_directory = 7;           // Container working directory (typically "/workspace")
+  string session_store_directory = 8;     // Container session store directory (typically "/.sofa/session-store")
+  string permission_mode = 9;             // e.g. "approve_all" | "read_only"
+
+  // Orthogonal model provider config: omitted when unbound or model_provider = null so the plugin uses native auth.
+  ProviderConfig provider = 10;
+
+  // Plugin-specific config and secrets (from harness env_refs & options, delivered in-memory over AutoMTLS, never via container launch env).
+  map<string, string> harness_env = 11;
+  bytes harness_options_json = 12;
+
+  // Host-managed tool declarations (sofa_* protocol tools, go_tool, external_tool, sofa_read_mcp_resource).
+  repeated HostToolSpec host_tools = 13;
+
+  // Tool filters: wrapper distinguishes HCL null (unconfigured) from [] (explicit empty list).
+  ToolFilter available_tools = 14;
+  ToolFilter excluded_tools = 15;
+
+  // Skills configuration (paths already relocated to container read-only mounts /.sofa/bundle/... or /workspace/...).
+  repeated string skill_directories = 16;
+  repeated string skills = 17;
+  repeated string disabled_skills = 18;
+
+  // Credential-materialized MCP server list.
+  repeated MCPServerConfig mcp_servers = 19;
+}
+
+message ProviderConfig {
+  string type = 1;         // "openai" | "azure" | "anthropic"
+  string base_url = 2;     // API Root Endpoint
+  string wire_api = 3;     // Optional: "completions" | "responses"
+  string transport = 4;    // Optional: "http" | "websockets"
+  map<string, string> headers = 5;
+  string model_id = 6;     // profile
+  string wire_model = 7;   // model
+  oneof auth {
+    string api_key = 8;
+    string bearer_token = 9;
+  }
+}
+
+message HostToolSpec {
+  string name = 1;
+  string description = 2;
+  bytes parameters_json_schema = 3; // Standard JSON Schema object bytes
+}
+
+message ToolFilter {
+  bool configured = 1;
+  repeated string names = 2;
+}
+
+message MCPServerConfig {
+  string name = 1;
+  repeated string tools = 2;
+  int32 timeout_ms = 3;
+  oneof transport {
+    MCPHTTPTransport http = 4;
+    MCPStdioTransport stdio = 5;
+  }
+}
+
+message MCPHTTPTransport {
+  string url = 1;
+  map<string, string> headers = 2;
+}
+
+message MCPStdioTransport {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string working_directory = 4;
+}
+
+message OpenSessionResponse {
+  string session_id = 1;     // Effective underlying session ID
+  bool resumed = 2;          // Whether an existing session was resumed
+  ErrorDetail error = 3;     // Non-nil indicates business-level failure (for host RetryPolicy or new-session fallback)
+}
+
+message AbortTurnRequest {
+  string session_id = 1;
+  string turn_id = 2;
+}
+
+message AbortTurnResponse {
+  ErrorDetail error = 1;
+}
+
+message ResumeSessionRequest {
+  string session_id = 1;
+}
+
+message ResumeSessionResponse {
+  ErrorDetail error = 1;
+}
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {
+  ErrorDetail error = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ReadMCPResource (aligned with r42 session.RPC.MCP.Resources().Read)
+// ---------------------------------------------------------------------------
+
+message ReadMCPResourceRequest {
+  string session_id = 1;
+  string server_name = 2;
+  string uri = 3;
+}
+
+message MCPResourceContent {
+  string uri = 1;
+  string mime_type = 2;
+  string text = 3;
+  bytes blob = 4;
+  map<string, string> meta = 5;
+}
+
+message ReadMCPResourceResponse {
+  repeated MCPResourceContent contents = 1;
+  ErrorDetail error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// RunTurn Bidirectional Stream Frames
+// ---------------------------------------------------------------------------
+
+message HostTurnFrame {
+  oneof payload {
+    StartTurnRequest start_turn = 1;
+    PreToolUseDecision pre_tool_use_decision = 2;
+    PostToolUseAck post_tool_use_ack = 3;
+    InvokeHostToolResponse invoke_host_tool_response = 4;
+  }
+}
+
+message StartTurnRequest {
+  string session_id = 1;
+  string turn_id = 2;
+  string prompt = 3;
+}
+
+message PreToolUseDecision {
+  string hook_call_id = 1;
+  bool allow = 2;
+  string deny_reason = 3;             // Reason fed back to the LLM when allow=false (quota exhausted, checkpoint required, waiting human)
+  bytes modified_arguments_json = 4;  // Optional: host-rewritten arguments JSON
+  string additional_context = 5;      // Optional: host-injected human diary interjection context
+}
+
+message PostToolUseAck {
+  string hook_call_id = 1;
+}
+
+enum HostToolResultType {
+  HOST_TOOL_RESULT_TYPE_UNSPECIFIED = 0;
+  HOST_TOOL_RESULT_TYPE_SUCCESS = 1;  // Normal return (including {"accepted": false, "issues": [...]} for LLM self-repair)
+  HOST_TOOL_RESULT_TYPE_FAILURE = 2;  // Hard gate rejection (aligned with r42 ResultType="failure")
+}
+
+message InvokeHostToolResponse {
+  string tool_call_id = 1;
+  HostToolResultType result_type = 2;
+  string text_result_for_llm = 3;
+  string handler_error = 4;            // Non-empty indicates tool execution error (logged as failure and triggers quota rollback)
+}
+
+message PluginTurnFrame {
+  oneof payload {
+    SessionEvent event = 1;
+    PreToolUseRequest pre_tool_use = 2;
+    PostToolUseRequest post_tool_use = 3;
+    InvokeHostToolRequest invoke_host_tool = 4;
+    TurnResult turn_result = 5;
+  }
+}
+
+// Anti-double-interception invariant:
+// PreToolUseRequest and PostToolUseRequest MUST ONLY be sent for non-host tools (built-in tools like bash/view/edit and MCP tools).
+// Tools listed in OpenSessionRequest.host_tools MUST send InvokeHostToolRequest directly without triggering PreToolUse/PostToolUse.
+message PreToolUseRequest {
+  string hook_call_id = 1;
+  string tool_call_id = 2;
+  string tool_name = 3;
+  bytes arguments_json = 4;
+}
+
+message PostToolUseRequest {
+  string hook_call_id = 1;
+  string tool_call_id = 2;
+  string tool_name = 3;
+  bool succeeded = 4;         // When false, host triggers quota.rollback(tool_name) (1:1 with r42 OnPostToolUseFailure)
+  string error_message = 5;
+}
+
+message InvokeHostToolRequest {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  bytes arguments_json = 3;
+}
+
+enum SessionEventKind {
+  SESSION_EVENT_KIND_UNSPECIFIED = 0;
+  SESSION_EVENT_KIND_ASSISTANT_MESSAGE_DELTA = 1;
+  SESSION_EVENT_KIND_ASSISTANT_MESSAGE = 2;
+  SESSION_EVENT_KIND_ASSISTANT_REASONING_DELTA = 3;
+  SESSION_EVENT_KIND_ASSISTANT_REASONING = 4;
+  SESSION_EVENT_KIND_ASSISTANT_USAGE = 5;
+  SESSION_EVENT_KIND_ASSISTANT_TOOL_CALL_DELTA = 6;
+  SESSION_EVENT_KIND_TOOL_EXECUTION_START = 7;
+  SESSION_EVENT_KIND_TOOL_EXECUTION_PROGRESS = 8;
+  SESSION_EVENT_KIND_TOOL_SHELL_OUTPUT = 9;
+  SESSION_EVENT_KIND_TOOL_EXECUTION_COMPLETE = 10;
+  SESSION_EVENT_KIND_SUBAGENT_STARTED = 11;
+  SESSION_EVENT_KIND_SUBAGENT_COMPLETED = 12;
+  SESSION_EVENT_KIND_SUBAGENT_FAILED = 13;
+  SESSION_EVENT_KIND_SESSION_WARNING = 14;
+  SESSION_EVENT_KIND_SESSION_IDLE = 15;
+}
+
+message TokenUsage {
+  string model = 1;
+  string api_call_id = 2;
+  int64 input_tokens = 3;
+  int64 output_tokens = 4;
+  int64 reasoning_tokens = 5;
+  int64 cache_read_tokens = 6;
+  int64 cache_write_tokens = 7;
+}
+
+message SessionEvent {
+  string event_id = 1;
+  int64 timestamp_unix_nano = 2;
+  SessionEventKind kind = 3;
+  string message_id = 4;       // assistant message_id or reasoning_id
+  string tool_call_id = 5;
+  string tool_name = 6;
+  string subagent_name = 7;
+  string text = 8;             // delta/full text, reasoning content, progress description, shell output chunk, or warning
+  bytes arguments_json = 9;    // argument snapshot on TOOL_EXECUTION_START
+  bytes result_json = 10;      // result snapshot on TOOL_EXECUTION_COMPLETE
+  string error_message = 11;   // tool or subagent failure reason
+  TokenUsage usage = 12;       // token stats on ASSISTANT_USAGE
+  bytes raw_sdk_event_json = 13; // Optional: raw underlying SDK event JSON (archived in BlobStore debug logs)
+}
+
+message TurnResult {
+  string turn_id = 1;
+  string assistant_message_id = 2;
+  string final_content = 3;
+  ErrorDetail error = 4;       // Non-nil indicates turn failure (rate limit, auth error, context limit, etc.)
+}
+
+// ---------------------------------------------------------------------------
+// Unified Error Classification (consumed by host provider.RetryPolicy)
+// ---------------------------------------------------------------------------
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_TRANSIENT = 1;              // Network jitter, 5xx, disconnect (retryable)
+  ERROR_CATEGORY_RATE_LIMIT = 2;             // 429 rate limit (retryable, aligned with r42 ErrorType=="rate_limit")
+  ERROR_CATEGORY_AUTHENTICATION = 3;         // 401 invalid credentials (permanent, no retry)
+  ERROR_CATEGORY_AUTHORIZATION = 4;          // 403 forbidden (permanent, no retry)
+  ERROR_CATEGORY_QUOTA = 5;                  // Account quota/credits exhausted (permanent, no retry)
+  ERROR_CATEGORY_CONTEXT_LIMIT = 6;          // Context window exceeded (permanent, no retry)
+  ERROR_CATEGORY_SESSION_NOT_FOUND = 7;      // Underlying session missing on Resume (host falls back to new session + diary replay)
+  ERROR_CATEGORY_UNSUPPORTED_CAPABILITY = 8; // Requested provider type or capability unsupported by this harness (permanent)
+  ERROR_CATEGORY_INTERNAL = 9;               // Other uncategorized error (matched against host error_message_regex / HTTP status)
+}
+
+message ErrorDetail {
+  ErrorCategory category = 1;
+  int32 http_status_code = 2;
+  string message = 3;
+}

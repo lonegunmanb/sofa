@@ -241,6 +241,42 @@ func TestBuildRunArgsMatrixAndGuards(t *testing.T) {
 		HostWorkspaceDir: ws,
 	})
 	require.NoError(t, err)
+
+	// HandshakeEnv allows only SOFA_HARNESS_PLUGIN and PLUGIN_* keys.
+	hsArgs, err := runtime.BuildRunArgs(runtime.SessionMountLayout{
+		Sandbox:          sandboxspec.SandboxConfig{Runtime: "podman", Image: "alpine:latest", Network: "bridge"},
+		HostOS:           "windows",
+		ForAgentSession:  true,
+		HostWorkspaceDir: ws,
+		HandshakeEnv: []string{
+			"SOFA_HARNESS_PLUGIN=sofa-harness-v1",
+			"PLUGIN_MIN_PORT=19500",
+			"PLUGIN_MAX_PORT=19500",
+			"PLUGIN_CLIENT_CERT=-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n",
+		},
+	})
+	require.NoError(t, err)
+	hsEnv := collectFlagValues(hsArgs, "-e")
+	assert.Contains(t, hsEnv, "SOFA_HARNESS_PLUGIN=sofa-harness-v1")
+	assert.Contains(t, hsEnv, "PLUGIN_MIN_PORT=19500")
+	assert.Contains(t, hsEnv, "PLUGIN_MAX_PORT=19500")
+
+	for _, forbidden := range []string{
+		"OPENAI_API_KEY=sk-secret",
+		"GITHUB_TOKEN=ghp-secret",
+		"SOFA_HARNESS_PLUGIN_EXTRA=nope",
+		"NO_EQUALS",
+		"=empty-key",
+	} {
+		_, err := runtime.BuildRunArgs(runtime.SessionMountLayout{
+			Sandbox:          sandboxspec.SandboxConfig{Runtime: "podman", Image: "alpine:latest", Network: "bridge"},
+			HostOS:           "windows",
+			ForAgentSession:  true,
+			HostWorkspaceDir: ws,
+			HandshakeEnv:     []string{forbidden},
+		})
+		require.Error(t, err, "expected HandshakeEnv %q to be rejected", forbidden)
+	}
 }
 
 type recordedCmd struct {
