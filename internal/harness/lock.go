@@ -86,6 +86,11 @@ type LockOptions struct {
 	LookupEnv           func(string) (string, bool)
 }
 
+// NewDefaultReleaseFetcher returns the default HTTP ReleaseFetcher used to download GitHub Release assets.
+func NewDefaultReleaseFetcher() ReleaseFetcher {
+	return &httpReleaseFetcher{client: &http.Client{Timeout: 30 * time.Second}}
+}
+
 // LockPlugins scans <stateDir>/config and <stateDir>/modules/** for harness declarations,
 // verifies remote releases according to their signature policy, and atomically writes plugins.lock.json.
 func LockPlugins(ctx context.Context, stateDir string, opts LockOptions) (PluginLockFile, error) {
@@ -118,7 +123,7 @@ func LockPlugins(ctx context.Context, stateDir string, opts LockOptions) (Plugin
 
 	fetcher := opts.ReleaseFetcher
 	if fetcher == nil {
-		fetcher = &httpReleaseFetcher{client: &http.Client{Timeout: 30 * time.Second}}
+		fetcher = NewDefaultReleaseFetcher()
 	}
 	verifier := opts.AttestationVerifier
 	if verifier == nil {
