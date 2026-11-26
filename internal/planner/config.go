@@ -15,6 +15,7 @@ import (
 	"github.com/lonegunmanb/sofa/internal/config"
 	harnessspec "github.com/lonegunmanb/sofa/internal/harness/spec"
 	mcpspec "github.com/lonegunmanb/sofa/internal/mcp/spec"
+	mergespec "github.com/lonegunmanb/sofa/internal/merge/spec"
 	modulespec "github.com/lonegunmanb/sofa/internal/module/spec"
 	providerpkg "github.com/lonegunmanb/sofa/internal/provider"
 	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
@@ -58,6 +59,8 @@ func RegisterBlocks() {
 		golden.RegisterBlock(&toolspec.GoToolBlock{})
 		golden.RegisterBlock(&toolspec.ExternalToolBlock{})
 		golden.RegisterBlock(&workerspec.WorkerBlock{})
+		golden.RegisterBlock(&workerspec.DynamicWorkerBlock{})
+		golden.RegisterBlock(&mergespec.MergeBlock{})
 	})
 }
 
@@ -248,26 +251,43 @@ func (c *SofaConfig) HasRegisteredMCPResource(id string) bool {
 }
 
 func (c *SofaConfig) LookupSourceURL(name string) (string, bool) {
+	ctx := c.EvalContext()
 	for _, b := range golden.Blocks[*sourcespec.SourceBlock](c) {
 		if b.Name() == name {
-			return b.SourceConfig().URL, true
+			if u := b.SourceConfig().URL; u != "" {
+				return u, true
+			}
+			if u, ok := c.evalKnownHclStringAttr(b.HclBlock(), "url", ctx, 0); ok && u != "" {
+				return u, true
+			}
 		}
 	}
 	return "", false
 }
 
 func (c *SofaConfig) SingleRootSourceURL() (string, int) {
+	ctx := c.EvalContext()
 	sources := golden.Blocks[*sourcespec.SourceBlock](c)
 	if len(sources) == 1 {
-		return sources[0].SourceConfig().URL, 1
+		if u := sources[0].SourceConfig().URL; u != "" {
+			return u, 1
+		}
+		if u, ok := c.evalKnownHclStringAttr(sources[0].HclBlock(), "url", ctx, 0); ok {
+			return u, 1
+		}
 	}
 	return "", len(sources)
 }
 
 func (c *SofaConfig) LookupWorkerSourceURLs(address string) ([]string, bool) {
 	if v, ok := c.GetVertices()[address]; ok {
-		if wb, isWorker := v.(*workerspec.WorkerBlock); isWorker {
-			return []string{wb.WorkerConfig().SourceURL}, true
+		switch b := v.(type) {
+		case *workerspec.WorkerBlock:
+			return []string{b.WorkerConfig().SourceURL}, true
+		case *workerspec.DynamicWorkerBlock:
+			return []string{b.DynamicWorkerConfig().Content.SourceURL}, true
+		case *mergespec.MergeBlock:
+			return []string{b.MergeConfig().SourceURL}, true
 		}
 	}
 	if !strings.Contains(address, "[") {
@@ -283,6 +303,84 @@ func (c *SofaConfig) LookupWorkerSourceURLs(address string) ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (c *SofaConfig) LookupUpstreamSourceURLs(address string) ([]string, bool) {
+	return c.LookupWorkerSourceURLs(address)
+}
+
+func (c *SofaConfig) SourceBranches() []mergespec.SourceBranchInfo {
+	ctx := c.EvalContext()
+	sources := golden.Blocks[*sourcespec.SourceBlock](c)
+	out := make([]mergespec.SourceBranchInfo, 0, len(sources))
+	for _, s := range sources {
+		url, urlOK := c.evalKnownHclStringAttr(s.HclBlock(), "url", ctx, 0)
+		branch, branchOK := c.evalKnownHclStringAttr(s.HclBlock(), "branch", ctx, 0)
+		if !urlOK || !branchOK {
+			continue
+		}
+		out = append(out, mergespec.SourceBranchInfo{
+			URL:    url,
+			Branch: branch,
+		})
+	}
+	return out
+}
+
+func (c *SofaConfig) PreservedKnownBranches() []mergespec.PreservedBranchInfo {
+	ctx := c.EvalContext()
+	preserves := golden.Blocks[*sourcespec.PreserveBlock](c)
+	out := make([]mergespec.PreservedBranchInfo, 0, len(preserves))
+	for _, p := range preserves {
+		url, urlOK := c.evalKnownHclStringAttr(p.HclBlock(), "url", ctx, 0)
+		branch, branchOK := c.evalKnownHclStringAttr(p.HclBlock(), "branch", ctx, 0)
+		if !urlOK || !branchOK {
+			continue
+		}
+		out = append(out, mergespec.PreservedBranchInfo{
+			URL:    url,
+			Branch: branch,
+		})
+	}
+	return out
+}
+
+func (c *SofaConfig) evalKnownHclStringAttr(
+	block *golden.HclBlock,
+	attrName string,
+	ctx *hcl.EvalContext,
+	depth int,
+) (string, bool) {
+	if block == nil || depth > 2 {
+		return "", false
+	}
+	attr, ok := block.Attributes()[attrName]
+	if !ok {
+		return "", false
+	}
+	val, diags := attr.Expr.Value(ctx)
+	var unmarked cty.Value
+	if !diags.HasErrors() {
+		unmarked, _ = val.UnmarkDeep()
+	}
+	if diags.HasErrors() || unmarked.IsNull() || !unmarked.IsWhollyKnown() {
+		if traversal, tDiags := hcl.AbsTraversalForExpr(attr.Expr); !tDiags.HasErrors() && len(traversal) == 3 && traversal.RootName() == "source" {
+			if srcName, ok := traversal[1].(hcl.TraverseAttr); ok {
+				if fieldAttr, ok := traversal[2].(hcl.TraverseAttr); ok && (fieldAttr.Name == "url" || fieldAttr.Name == "branch") {
+					for _, s := range golden.Blocks[*sourcespec.SourceBlock](c) {
+						if s.Name() == srcName.Name {
+							return c.evalKnownHclStringAttr(s.HclBlock(), fieldAttr.Name, ctx, depth+1)
+						}
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	if !unmarked.Type().Equals(cty.String) {
+		return "", false
+	}
+	return unmarked.AsString(), true
 }
 
 func (c *SofaConfig) ResolveLocalExpr(name string) (hcl.Expression, bool) {
@@ -303,3 +401,4 @@ func (c *SofaConfig) ResolveLocalExpr(name string) (hcl.Expression, bool) {
 
 var _ golden.Config = (*SofaConfig)(nil)
 var _ workerspec.ModuleRegistry = (*SofaConfig)(nil)
+var _ mergespec.ModuleRegistry = (*SofaConfig)(nil)

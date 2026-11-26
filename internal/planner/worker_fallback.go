@@ -13,21 +13,26 @@ import (
 func validateWorkerFallbacks(blocks []*golden.HclBlock) error {
 	blockMap := map[string]*golden.HclBlock{}
 	workers := map[string]*golden.HclBlock{}
+	dynamicWorkers := map[string]*golden.HclBlock{}
 	for _, block := range blocks {
 		if block == nil || len(block.Labels) != 2 {
 			continue
 		}
 		address := rawBlockAddress(block)
 		blockMap[address] = block
-		if block.Type == "worker" {
+		switch block.Type {
+		case "worker":
 			workers[address] = block
+		case "dynamic_worker":
+			dynamicWorkers[address] = block
 		}
 	}
 
 	dependencies := make(map[string]map[string]struct{}, len(blockMap))
 	for address, block := range blockMap {
 		dependencies[address] = map[string]struct{}{}
-		walkPositiveBlockTraversals(block, block.Type == "worker", func(traversal hcl.Traversal) {
+		skipFallback := block.Type == "worker" || block.Type == "dynamic_worker"
+		walkPositiveBlockTraversals(block, skipFallback, func(traversal hcl.Traversal) {
 			for _, target := range resolveInitTraversalTargets(traversal, blockMap) {
 				if target != address {
 					dependencies[address][target] = struct{}{}
@@ -37,25 +42,47 @@ func validateWorkerFallbacks(blocks []*golden.HclBlock) error {
 	}
 
 	for address, block := range workers {
-		for _, nested := range block.NestedBlocks() {
-			if nested.Type != "fallback" {
+		if err := validateBlockFallbacks(address, block, dependencies); err != nil {
+			return err
+		}
+	}
+	for address, block := range dynamicWorkers {
+		for _, dyn := range block.NestedBlocks() {
+			if dyn.Type != "dynamic" || len(dyn.Labels) != 1 || dyn.Labels[0] != "worker" {
 				continue
 			}
-			targetAttr, ok := nested.Attributes()["target"]
-			if !ok {
-				continue
+			for _, content := range dyn.NestedBlocks() {
+				if content.Type != "content" || len(content.Labels) != 0 {
+					continue
+				}
+				if err := validateBlockFallbacks(address, content, dependencies); err != nil {
+					return err
+				}
 			}
-			target, err := workerspec.ParseFallbackTargetExpr(targetAttr.Expr, targetAttr.ExprString())
-			if err != nil {
-				return fmt.Errorf("worker %s: %w", address, err)
-			}
-			baseTarget := baseWorkerAddress(target)
-			if baseTarget == address {
-				return fmt.Errorf("worker %s fallback target must not reference itself", address)
-			}
-			if !workerAncestor(address, baseTarget, dependencies, map[string]struct{}{}) {
-				return fmt.Errorf("worker %s fallback target %s is not a positive ancestor", address, target)
-			}
+		}
+	}
+	return nil
+}
+
+func validateBlockFallbacks(address string, block *golden.HclBlock, dependencies map[string]map[string]struct{}) error {
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type != "fallback" {
+			continue
+		}
+		targetAttr, ok := nested.Attributes()["target"]
+		if !ok {
+			continue
+		}
+		target, err := workerspec.ParseFallbackTargetExpr(targetAttr.Expr, targetAttr.ExprString())
+		if err != nil {
+			return fmt.Errorf("worker %s: %w", address, err)
+		}
+		baseTarget := baseWorkerAddress(target)
+		if baseTarget == address {
+			return fmt.Errorf("worker %s fallback target must not reference itself", address)
+		}
+		if !workerAncestor(address, baseTarget, dependencies, map[string]struct{}{}) {
+			return fmt.Errorf("worker %s fallback target %s is not a positive ancestor", address, target)
 		}
 	}
 	return nil
@@ -89,7 +116,8 @@ func (c *SofaConfig) ValidateWorkerFallbackTargets(workerAddress string, targets
 	for addr, b := range allBlocks {
 		dependencies[addr] = map[string]struct{}{}
 		_, isWorker := b.(*workerspec.WorkerBlock)
-		walkPositiveBlockTraversals(b.HclBlock(), isWorker, func(traversal hcl.Traversal) {
+		_, isDynamicWorker := b.(*workerspec.DynamicWorkerBlock)
+		walkPositiveBlockTraversals(b.HclBlock(), isWorker || isDynamicWorker, func(traversal hcl.Traversal) {
 			for _, dep := range resolveExpandedTraversalTargets(traversal, allBlocks, baseToInstances) {
 				if dep != addr {
 					dependencies[addr][dep] = struct{}{}

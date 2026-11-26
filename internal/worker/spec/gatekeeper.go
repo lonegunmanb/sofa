@@ -81,7 +81,7 @@ func validateGatekeeper(g GatekeeperConfig) error {
 	return nil
 }
 
-func decodeGatekeeper(block *golden.HclBlock, ctx *hcl.EvalContext) (GatekeeperConfig, error) {
+func DecodeGatekeeper(block *golden.HclBlock, ctx *hcl.EvalContext) (GatekeeperConfig, error) {
 	if len(block.Labels) != 1 {
 		return GatekeeperConfig{}, fail("worker gatekeeper block must have exactly one name")
 	}

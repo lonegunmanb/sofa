@@ -60,6 +60,10 @@ func artifactValue(artifact Artifact) cty.Value {
 	})
 }
 
+func ValidateSafeLabel(label, scope string, forbidPathTokens bool) error {
+	return validateSafeLabel(label, scope, forbidPathTokens)
+}
+
 func validateSafeLabel(label, scope string, forbidPathTokens bool) error {
 	if strings.TrimSpace(label) == "" {
 		return fmt.Errorf("%s name must not be empty", scope)
@@ -143,7 +147,7 @@ func decodeArtifact(block *golden.HclBlock, ctx *hcl.EvalContext) (Artifact, err
 	return art, nil
 }
 
-func decodeImport(block *golden.HclBlock, ctx *hcl.EvalContext, workerName string) (ImportArtifact, error) {
+func decodeImport(block *golden.HclBlock, ctx *hcl.EvalContext, ownerBlockType, workerName string) (ImportArtifact, error) {
 	if len(block.Labels) != 1 {
 		return ImportArtifact{}, fail("worker import_artifact block must have exactly one name")
 	}
@@ -183,7 +187,7 @@ func decodeImport(block *golden.HclBlock, ctx *hcl.EvalContext, workerName strin
 	if !ok {
 		return ImportArtifact{}, fail("%s sources is required", scope)
 	}
-	if err := rejectSelfArtifactReferenceInImport(sourcesAttr.Expr, workerName, scope); err != nil {
+	if err := rejectSelfArtifactReferenceInImport(sourcesAttr.Expr, ownerBlockType, workerName, scope); err != nil {
 		return ImportArtifact{}, err
 	}
 	value, diags := sourcesAttr.Expr.Value(ctx)
@@ -197,11 +201,14 @@ func decodeImport(block *golden.HclBlock, ctx *hcl.EvalContext, workerName strin
 	return imported, nil
 }
 
-func rejectSelfArtifactReferenceInImport(expr hcl.Expression, workerName, scope string) error {
+func rejectSelfArtifactReferenceInImport(expr hcl.Expression, ownerBlockType, workerName, scope string) error {
+	if ownerBlockType == "" {
+		ownerBlockType = "worker"
+	}
 	for _, traversal := range expr.Variables() {
-		if len(traversal) >= 2 && traversal.RootName() == "worker" {
+		if len(traversal) >= 2 && traversal.RootName() == ownerBlockType {
 			if attr, ok := traversal[1].(hcl.TraverseAttr); ok && attr.Name == workerName {
-				return fail("%s sources must not reference current worker %q", scope, workerName)
+				return fail("%s sources must not reference current %s %q", scope, ownerBlockType, workerName)
 			}
 		}
 	}

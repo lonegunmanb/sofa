@@ -207,3 +207,98 @@ output "plan_branch" {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 }
+
+const coldStartDynamicWorkerMergeChildEnv = "SOFA_COLD_START_DYNAMIC_MERGE_CHILD"
+
+func TestColdStartLoadDynamicWorkerAndMergeBeforeNewSofaConfig(t *testing.T) {
+	if os.Getenv(coldStartDynamicWorkerMergeChildEnv) == "1" {
+		dir := os.Getenv("SOFA_COLD_START_DIR")
+		loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
+		require.NoError(t, err)
+		require.False(t, diags.HasErrors(), diags.Error())
+		require.Len(t, loaded.Blocks, 9)
+
+		cfg := NewSofaConfig(ConfigArgs{
+			Context:   context.Background(),
+			Directory: dir,
+		})
+		require.NoError(t, cfg.Init(loaded.Blocks))
+		require.NoError(t, cfg.RunPlan())
+		require.Len(t, cfg.Outputs(), 1)
+		require.False(t, cfg.Outputs()[0].Value.IsKnown())
+		return
+	}
+
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/repo.git"
+  branch = "main"
+}
+
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+}
+
+harness "local" {}
+
+go_tool "discover_checks" {
+  description = "Discover"
+  source = <<-GO
+    import "context"
+    type Input struct{}
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }
+  GO
+}
+
+worker "discover" {
+  based_source      = source.project.branch
+  model             = "test-model"
+  system_prompt     = "discover"
+  terminate_tool_id = go_tool.discover_checks.id
+}
+
+dynamic_worker "verify" {
+  dynamic "worker" {
+    for_each = jsondecodewithtype(
+      worker.discover.result,
+      object({ checks = map(string) })
+    ).checks
+    iterator = check
+
+    content {
+      based_source  = worker.discover.work_branch
+      model         = "test-model"
+      system_prompt = "verify"
+      prompt        = "Check ${check.key}: ${check.value}"
+    }
+  }
+}
+
+merge "integrate" {
+  based_source = worker.discover.work_branch
+  sources      = dynamic_worker.verify.work_branches
+  gatekeeper "test" {
+    command = ["go", "test", "./..."]
+  }
+}
+
+preserve "final" {
+  branch = merge.integrate.work_branch
+}
+
+output "merged" {
+  value = merge.integrate.work_branch
+}
+`)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestColdStartLoadDynamicWorkerAndMergeBeforeNewSofaConfig$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		coldStartDynamicWorkerMergeChildEnv+"=1",
+		"SOFA_COLD_START_DIR="+dir,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}

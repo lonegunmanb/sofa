@@ -136,9 +136,11 @@ func (c Config) Clone() Config {
 
 type WorkerBlock struct {
 	*golden.BaseBlock
-	planned     Config
-	artifacts   map[string]Artifact
-	importPaths map[string]cty.Value
+	planned        Config
+	artifacts      map[string]Artifact
+	importPaths    map[string]cty.Value
+	expandedBlock  *golden.HclBlock
+	ownerBlockType string
 }
 
 var (
@@ -290,6 +292,7 @@ func (w *WorkerBlock) Decode(block *golden.HclBlock, baseCtx *hcl.EvalContext) e
 	w.planned = Config{}
 	w.artifacts = map[string]Artifact{}
 	w.importPaths = map[string]cty.Value{}
+	w.expandedBlock = nil
 
 	if err := validateSafeLabel(w.Name(), "worker", false); err != nil {
 		return err
@@ -340,6 +343,7 @@ func (w *WorkerBlock) Decode(block *golden.HclBlock, baseCtx *hcl.EvalContext) e
 
 	w.planned.Artifacts = maps.Clone(w.artifacts)
 	w.planned.Imports = maps.Clone(w.planned.Imports)
+	w.expandedBlock = expanded
 	if deferred {
 		expr, err := buildDeferredExpression(expanded, w.planned.Imports, w.planned.Fallbacks)
 		if err != nil {
@@ -582,6 +586,19 @@ func (w *WorkerBlock) resolveBasedSourceURL(reg ModuleRegistry) (string, error) 
 						}
 					}
 				}
+			case "dynamic_worker", "merge":
+				if len(traversal) >= 2 {
+					if uAttr, ok := traversal[1].(hcl.TraverseAttr); ok {
+						addr := traversal.RootName() + "." + uAttr.Name
+						if upstreamURLs, exists := reg.LookupWorkerSourceURLs(addr); exists {
+							for _, u := range upstreamURLs {
+								if u != "" {
+									urls[u] = struct{}{}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 		return nil
@@ -615,6 +632,10 @@ func (w *WorkerBlock) contextWithBase(base *hcl.EvalContext) *hcl.EvalContext {
 		base = &hcl.EvalContext{}
 	}
 	return w.addWorkerLocals(base)
+}
+
+func HasDynamicBlocks(block *golden.HclBlock) bool {
+	return hasDynamicBlocks(block)
 }
 
 func hasDynamicBlocks(block *golden.HclBlock) bool {
@@ -713,7 +734,11 @@ func (w *WorkerBlock) decodeNestedDeclarations(block *golden.HclBlock, ctx *hcl.
 			paths[art.Path] = art.Name
 			w.artifacts[art.Name] = art
 		case "import_artifact":
-			imported, err := decodeImport(nested, ctx, w.Name())
+			ownerType := w.ownerBlockType
+			if ownerType == "" {
+				ownerType = "worker"
+			}
+			imported, err := decodeImport(nested, ctx, ownerType, w.Name())
 			if err != nil {
 				return err
 			}
@@ -923,7 +948,7 @@ func (w *WorkerBlock) decodeNestedExecution(block *golden.HclBlock, ctx *hcl.Eva
 			}
 			w.planned.Retry = override
 		case "gatekeeper":
-			gatekeeper, err := decodeGatekeeper(nested, ctx)
+			gatekeeper, err := DecodeGatekeeper(nested, ctx)
 			if err != nil {
 				return err
 			}
@@ -1167,6 +1192,10 @@ func requiredKnownNonBlankString(block *golden.HclBlock, ctx *hcl.EvalContext, n
 	return str, nil
 }
 
+func OptionalKnownString(block *golden.HclBlock, ctx *hcl.EvalContext, name, scope string) (string, bool, error) {
+	return optionalKnownString(block, ctx, name, scope)
+}
+
 func optionalKnownString(block *golden.HclBlock, ctx *hcl.EvalContext, name, scope string) (string, bool, error) {
 	attr, ok := block.Attributes()[name]
 	if !ok {
@@ -1187,6 +1216,10 @@ func optionalKnownString(block *golden.HclBlock, ctx *hcl.EvalContext, name, sco
 		return "", false, fail("%s %s must be a string", scope, name)
 	}
 	return unmarked.AsString(), true, nil
+}
+
+func RequiredStringAllowUnknown(block *golden.HclBlock, ctx *hcl.EvalContext, name, scope string) (cty.Value, error) {
+	return requiredStringAllowUnknown(block, ctx, name, scope)
 }
 
 func requiredStringAllowUnknown(block *golden.HclBlock, ctx *hcl.EvalContext, name, scope string) (cty.Value, error) {
@@ -1259,6 +1292,10 @@ func optionalBlockReference(block *golden.HclBlock, ctx *hcl.EvalContext, name, 
 		return cty.NilVal, err
 	}
 	return value, nil
+}
+
+func ValidateBlockReference(value cty.Value, expectedKind, scope string) error {
+	return validateBlockReference(value, expectedKind, scope)
 }
 
 func validateBlockReference(value cty.Value, expectedKind, scope string) error {
@@ -1384,6 +1421,10 @@ func optionalIntMap(block *golden.HclBlock, ctx *hcl.EvalContext, name, scope st
 		result[k.AsString()] = n
 	}
 	return result, nil
+}
+
+func OptionalWholeInt(block *golden.HclBlock, ctx *hcl.EvalContext, name string, defaultValue int, scope string) (int, error) {
+	return optionalWholeInt(block, ctx, name, defaultValue, scope)
 }
 
 func optionalWholeInt(block *golden.HclBlock, ctx *hcl.EvalContext, name string, defaultValue int, scope string) (int, error) {

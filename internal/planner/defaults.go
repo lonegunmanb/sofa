@@ -142,62 +142,183 @@ func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 	}
 
 	for index, block := range result {
-		if block == nil || block.Type != "worker" || len(block.Labels) != 2 {
+		if block == nil || len(block.Labels) != 2 {
 			continue
 		}
-		worker, err := injectWorkerRootDefaults(block, defaults)
-		if err != nil {
-			return nil, err
+		switch block.Type {
+		case "worker":
+			worker, err := injectWorkerRootDefaults(block, defaults)
+			if err != nil {
+				return nil, err
+			}
+			result[index] = worker
+		case "dynamic_worker":
+			dynWorker, err := injectDynamicWorkerRootDefaults(block, defaults)
+			if err != nil {
+				return nil, err
+			}
+			result[index] = dynWorker
+		case "merge":
+			mergeBlock, err := injectMergeRootDefaults(block, defaults)
+			if err != nil {
+				return nil, err
+			}
+			result[index] = mergeBlock
 		}
-		result[index] = worker
 	}
 	return result, nil
 }
 
-func injectWorkerRootDefaults(block *golden.HclBlock, defaults RootDefaults) (*golden.HclBlock, error) {
-	address := block.Labels[1]
-	result := block
-	if _, explicit := result.Body.Attributes["sandbox"]; !explicit {
-		name, err := defaults.ResolveDefaultSandbox("worker." + address)
+func resolveMissingWorkerDefaultTraversals(
+	attrs map[string]*hclsyntax.Attribute,
+	consumerAddr string,
+	posRange hcl.Range,
+	defaults RootDefaults,
+) (map[string]hcl.Traversal, error) {
+	injections := map[string]hcl.Traversal{}
+	if _, explicit := attrs["sandbox"]; !explicit {
+		name, err := defaults.ResolveDefaultSandbox(consumerAddr)
 		if err != nil {
 			return nil, err
 		}
-		result = cloneBlockWithTraversalAttribute(result, "sandbox", hcl.Traversal{
-			hcl.TraverseRoot{Name: "sandbox", SrcRange: result.TypeRange},
-			hcl.TraverseAttr{Name: name, SrcRange: result.TypeRange},
-		})
+		injections["sandbox"] = hcl.Traversal{
+			hcl.TraverseRoot{Name: "sandbox", SrcRange: posRange},
+			hcl.TraverseAttr{Name: name, SrcRange: posRange},
+		}
 	}
-	if _, explicit := result.Body.Attributes["harness"]; !explicit {
-		name, err := defaults.ResolveDefaultHarness("worker." + address)
+	if _, explicit := attrs["harness"]; !explicit {
+		name, err := defaults.ResolveDefaultHarness(consumerAddr)
 		if err != nil {
 			return nil, err
 		}
-		result = cloneBlockWithTraversalAttribute(result, "harness", hcl.Traversal{
-			hcl.TraverseRoot{Name: "harness", SrcRange: result.TypeRange},
-			hcl.TraverseAttr{Name: name, SrcRange: result.TypeRange},
-		})
+		injections["harness"] = hcl.Traversal{
+			hcl.TraverseRoot{Name: "harness", SrcRange: posRange},
+			hcl.TraverseAttr{Name: name, SrcRange: posRange},
+		}
 	}
-	if _, explicit := result.Body.Attributes["model_provider"]; !explicit {
-		name, err := defaults.ResolveDefaultModelProvider("worker." + address)
+	if _, explicit := attrs["model_provider"]; !explicit {
+		name, err := defaults.ResolveDefaultModelProvider(consumerAddr)
 		if err != nil {
 			return nil, err
 		}
 		if name != nil {
-			result = cloneBlockWithTraversalAttribute(result, "model_provider", hcl.Traversal{
-				hcl.TraverseRoot{Name: "model_provider", SrcRange: result.TypeRange},
-				hcl.TraverseAttr{Name: *name, SrcRange: result.TypeRange},
-			})
+			injections["model_provider"] = hcl.Traversal{
+				hcl.TraverseRoot{Name: "model_provider", SrcRange: posRange},
+				hcl.TraverseAttr{Name: *name, SrcRange: posRange},
+			}
 		}
 	}
-	return result, nil
+	return injections, nil
 }
 
-func cloneBlockWithTraversalAttribute(
+func injectWorkerRootDefaults(block *golden.HclBlock, defaults RootDefaults) (*golden.HclBlock, error) {
+	address := block.Labels[1]
+	injections, err := resolveMissingWorkerDefaultTraversals(
+		block.Body.Attributes,
+		"worker."+address,
+		block.TypeRange,
+		defaults,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(injections) == 0 {
+		return block, nil
+	}
+	return cloneBlockWithTraversalAttributes(block, injections), nil
+}
+
+func injectDynamicWorkerRootDefaults(block *golden.HclBlock, defaults RootDefaults) (*golden.HclBlock, error) {
+	dynIdx := -1
+	dynCount := 0
+	for i, nested := range block.NestedBlocks() {
+		if nested.Type == "dynamic" && len(nested.Labels) == 1 && nested.Labels[0] == "worker" {
+			dynIdx = i
+			dynCount++
+		}
+	}
+	if dynCount != 1 {
+		return block, nil
+	}
+	dynBlock := block.NestedBlocks()[dynIdx]
+	contentIdx := -1
+	contentCount := 0
+	for i, nested := range dynBlock.NestedBlocks() {
+		if nested.Type == "content" && len(nested.Labels) == 0 {
+			contentIdx = i
+			contentCount++
+		}
+	}
+	if contentCount != 1 {
+		return block, nil
+	}
+
+	contentBlock := dynBlock.NestedBlocks()[contentIdx]
+	injections, err := resolveMissingWorkerDefaultTraversals(
+		contentBlock.Body.Attributes,
+		"dynamic_worker."+block.Labels[1],
+		contentBlock.TypeRange,
+		defaults,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(injections) == 0 {
+		return block, nil
+	}
+
+	syntaxBlock := golden.CloneHclSyntaxBlock(block.Block)
+	syntaxContent := syntaxBlock.Body.Blocks[dynIdx].Body.Blocks[contentIdx]
+	writeBlock := cloneWriteBlock(block)
+	writeContent := writeBlock.Body().Blocks()[dynIdx].Body().Blocks()[contentIdx]
+	for attrName, traversal := range injections {
+		setSyntaxAndWriteTraversalAttr(syntaxContent, writeContent, attrName, traversal)
+	}
+	return golden.NewHclBlock(syntaxBlock, writeBlock, block.ForEach), nil
+}
+
+func injectMergeRootDefaults(block *golden.HclBlock, defaults RootDefaults) (*golden.HclBlock, error) {
+	if _, explicit := block.Body.Attributes["sandbox"]; explicit {
+		return block, nil
+	}
+	hasGatekeeper := false
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type == "gatekeeper" || (nested.Type == "dynamic" && len(nested.Labels) == 1 && nested.Labels[0] == "gatekeeper") {
+			hasGatekeeper = true
+			break
+		}
+	}
+	if !hasGatekeeper {
+		return block, nil
+	}
+	name, err := defaults.ResolveDefaultSandbox("merge." + block.Labels[1])
+	if err != nil {
+		return nil, err
+	}
+	return cloneBlockWithTraversalAttribute(block, "sandbox", hcl.Traversal{
+		hcl.TraverseRoot{Name: "sandbox", SrcRange: block.TypeRange},
+		hcl.TraverseAttr{Name: name, SrcRange: block.TypeRange},
+	}), nil
+}
+
+func cloneBlockWithTraversalAttributes(
 	block *golden.HclBlock,
-	attributeName string,
-	traversal hcl.Traversal,
+	injections map[string]hcl.Traversal,
 ) *golden.HclBlock {
 	syntaxBlock := golden.CloneHclSyntaxBlock(block.Block)
+	writeBlock := cloneWriteBlock(block)
+	for attrName, traversal := range injections {
+		setSyntaxAndWriteTraversalAttr(syntaxBlock, writeBlock, attrName, traversal)
+	}
+	return golden.NewHclBlock(syntaxBlock, writeBlock, block.ForEach)
+}
+
+func setSyntaxAndWriteTraversalAttr(
+	syntaxBlock *hclsyntax.Block,
+	writeBlock *hclwrite.Block,
+	attributeName string,
+	traversal hcl.Traversal,
+) {
 	syntaxBlock.Body.Attributes[attributeName] = &hclsyntax.Attribute{
 		Name: attributeName,
 		Expr: &hclsyntax.ScopeTraversalExpr{
@@ -208,10 +329,15 @@ func cloneBlockWithTraversalAttribute(
 		NameRange:   syntaxBlock.TypeRange,
 		EqualsRange: syntaxBlock.TypeRange,
 	}
-
-	writeBlock := cloneWriteBlock(block)
 	writeBlock.Body().SetAttributeRaw(attributeName, hclwrite.TokensForTraversal(traversal))
-	return golden.NewHclBlock(syntaxBlock, writeBlock, block.ForEach)
+}
+
+func cloneBlockWithTraversalAttribute(
+	block *golden.HclBlock,
+	attributeName string,
+	traversal hcl.Traversal,
+) *golden.HclBlock {
+	return cloneBlockWithTraversalAttributes(block, map[string]hcl.Traversal{attributeName: traversal})
 }
 
 func cloneWriteBlock(block *golden.HclBlock) *hclwrite.Block {
