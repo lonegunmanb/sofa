@@ -200,6 +200,13 @@ func (c *SofaConfig) PlanChildModule(req modulespec.ModulePlanRequest) (modulesp
 		outputsMap[out.Name] = out
 	}
 
+	exportedInputs := maps.Clone(req.Inputs)
+	for name := range sensitiveVars {
+		if val, exists := exportedInputs[name]; exists {
+			exportedInputs[name] = specpkg.MarkSensitive(val)
+		}
+	}
+
 	return modulespec.ModulePlan{
 		Plan: modulespec.Plan{
 			Directory:           childDir,
@@ -216,7 +223,7 @@ func (c *SofaConfig) PlanChildModule(req modulespec.ModulePlanRequest) (modulesp
 		Parallelism:      req.Parallelism,
 		Timeout:          req.Timeout,
 		TimeoutRaw:       req.TimeoutRaw,
-		Inputs:           maps.Clone(req.Inputs),
+		Inputs:           exportedInputs,
 		InputExprs:       maps.Clone(req.InputExprs),
 	}, nil
 }

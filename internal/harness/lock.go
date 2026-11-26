@@ -171,13 +171,18 @@ func ReadLockFile(stateDir string) (PluginLockFile, error) {
 	if err := json.Unmarshal(encoded, &lockFile); err != nil {
 		return PluginLockFile{}, fmt.Errorf("decode plugin lockfile %q: %w", lockPath, err)
 	}
-	if err := validateLockFile(lockFile); err != nil {
+	if err := ValidateLockFile(lockFile); err != nil {
 		return PluginLockFile{}, fmt.Errorf("invalid plugin lockfile %q: %w", lockPath, err)
 	}
 	if lockFile.Plugins == nil {
 		lockFile.Plugins = []PluginLockEntry{}
 	}
 	return lockFile, nil
+}
+
+// ValidateLockFile verifies the schema version, entry invariants, and uniqueness of lockFile.
+func ValidateLockFile(lockFile PluginLockFile) error {
+	return validateLockFile(lockFile)
 }
 
 func validateLockFile(lockFile PluginLockFile) error {
@@ -281,6 +286,33 @@ func normalizeHostEnvSuffix(host string) string {
 		}
 	}
 	return b.String()
+}
+
+// CanSatisfyHarnessLock verifies whether cfg (when referencing a remote release) is satisfied
+// by an entry in lockFile under the exact same signature rules as LockPlugins.
+func CanSatisfyHarnessLock(cfg harnessspec.HarnessConfig, lockFile PluginLockFile) error {
+	if cfg.Source == "" {
+		return nil
+	}
+	for _, entry := range lockFile.Plugins {
+		if entry.Name != cfg.Name {
+			continue
+		}
+		if entry.Source != cfg.Source || entry.Version != cfg.Version {
+			return fmt.Errorf(
+				"harness %q lockfile mismatch (locked %s@%s, configured %s@%s); run sofa init --upgrade",
+				cfg.Name, entry.Source, entry.Version, cfg.Source, cfg.Version,
+			)
+		}
+		if !canReuseCachedEntry(cfg, entry) {
+			return fmt.Errorf(
+				"harness %q lockfile entry does not satisfy signature policy %q; run sofa init --upgrade",
+				cfg.Name, cfg.Signature,
+			)
+		}
+		return nil
+	}
+	return fmt.Errorf("harness %q (%s@%s) is not locked in plugins.lock.json; run sofa init --upgrade", cfg.Name, cfg.Source, cfg.Version)
 }
 
 func collectHarnessConfigs(ctx context.Context, stateDir string) (map[string]harnessspec.HarnessConfig, error) {

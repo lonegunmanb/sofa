@@ -109,6 +109,56 @@ func (b *ServerBlock) ServerConfig() mcppkg.Config {
 	return result
 }
 
+// HTTPHeadersValue returns the normalized map(string) of HTTP headers preserving sensitivity marks.
+func (b *ServerBlock) HTTPHeadersValue() cty.Value {
+	if len(b.HTTPBlocks) != 1 {
+		return cty.MapValEmpty(cty.String)
+	}
+	return markedStringMapValue(b.HTTPBlocks[0].Headers)
+}
+
+// StdioEnvValue returns the normalized map(string) of stdio env vars preserving sensitivity marks.
+func (b *ServerBlock) StdioEnvValue() cty.Value {
+	if len(b.StdioBlocks) != 1 {
+		return cty.MapValEmpty(cty.String)
+	}
+	return markedStringMapValue(b.StdioBlocks[0].Env)
+}
+
+func markedStringMapValue(value cty.Value) cty.Value {
+	if value == cty.NilVal {
+		return cty.MapValEmpty(cty.String)
+	}
+	unmarked, marks := value.UnmarkDeepWithPaths()
+	if unmarked.IsNull() {
+		_, outerMarks := value.Unmark()
+		return cty.MapValEmpty(cty.String).WithMarks(outerMarks)
+	}
+	converted, err := convert.Convert(unmarked, cty.Map(cty.String))
+	if err != nil {
+		return cty.MapValEmpty(cty.String)
+	}
+	if len(marks) > 0 {
+		converted = converted.MarkWithPaths(objectMarksToMapPaths(marks))
+	}
+	return converted
+}
+
+func objectMarksToMapPaths(marks []cty.PathValueMarks) []cty.PathValueMarks {
+	result := make([]cty.PathValueMarks, len(marks))
+	for i, pm := range marks {
+		p := make(cty.Path, len(pm.Path))
+		for j, step := range pm.Path {
+			if attr, ok := step.(cty.GetAttrStep); ok {
+				step = cty.IndexStep{Key: cty.StringVal(attr.Name)}
+			}
+			p[j] = step
+		}
+		result[i] = cty.PathValueMarks{Path: p, Marks: pm.Marks}
+	}
+	return result
+}
+
 func (b *ServerBlock) Value() cty.Value {
 	toolIDs := make(map[string]cty.Value, len(b.Tools))
 	for _, tool := range b.Tools {

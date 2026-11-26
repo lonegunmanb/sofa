@@ -302,16 +302,17 @@ func validateVersion(version string) error {
 // HarnessBlock implements the top-level `harness "<name>"` HCL block.
 type HarnessBlock struct {
 	*golden.BaseBlock
-	Source     *string   `hcl:"source,optional"`
-	Version    *string   `hcl:"version,optional"`
-	Signature  *string   `hcl:"signature,optional"`
-	SigningKey *string   `hcl:"signing_key,optional"`
-	EnvRefs    cty.Value `hcl:"env_refs,optional"`
-	Options    cty.Value `hcl:"options,optional"`
-	sourceVal  cty.Value
-	versionVal cty.Value
-	planned    cty.Value
-	plannedCfg *HarnessConfig
+	Source        *string   `hcl:"source,optional"`
+	Version       *string   `hcl:"version,optional"`
+	Signature     *string   `hcl:"signature,optional"`
+	SigningKey    *string   `hcl:"signing_key,optional"`
+	EnvRefs       cty.Value `hcl:"env_refs,optional"`
+	Options       cty.Value `hcl:"options,optional"`
+	sourceVal     cty.Value
+	versionVal    cty.Value
+	signingKeyVal cty.Value
+	planned       cty.Value
+	plannedCfg    *HarnessConfig
 }
 
 func (b *HarnessBlock) Type() string            { return "" }
@@ -330,6 +331,7 @@ func (b *HarnessBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalContext) 
 	b.Options = cty.NilVal
 	b.sourceVal = cty.NilVal
 	b.versionVal = cty.NilVal
+	b.signingKeyVal = cty.NilVal
 	b.planned = cty.NilVal
 	b.plannedCfg = nil
 
@@ -350,6 +352,8 @@ func (b *HarnessBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalContext) 
 				b.sourceVal = cty.NullVal(cty.String).WithMarks(outerMarks)
 			case "version":
 				b.versionVal = cty.NullVal(cty.String).WithMarks(outerMarks)
+			case "signing_key":
+				b.signingKeyVal = cty.NullVal(cty.String).WithMarks(outerMarks)
 			}
 			continue
 		}
@@ -361,6 +365,8 @@ func (b *HarnessBlock) BaseDecode(block *golden.HclBlock, ctx *hcl.EvalContext) 
 			b.sourceVal = value
 		case "version":
 			b.versionVal = value
+		case "signing_key":
+			b.signingKeyVal = value
 		}
 	}
 	return nil
@@ -428,6 +434,20 @@ func (b *HarnessBlock) Value() cty.Value {
 		return cty.DynamicVal
 	}
 	return b.planned
+}
+
+// SigningKeyValue returns the signing_key string value preserving sensitivity marks.
+func (b *HarnessBlock) SigningKeyValue() cty.Value {
+	if b.SigningKey == nil {
+		if b.signingKeyVal != cty.NilVal {
+			return b.signingKeyVal
+		}
+		return cty.NullVal(cty.String)
+	}
+	if b.signingKeyVal != cty.NilVal {
+		return b.signingKeyVal
+	}
+	return cty.StringVal(*b.SigningKey)
 }
 
 // HarnessConfig returns a deep-copied snapshot of the harness configuration.
