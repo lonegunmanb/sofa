@@ -93,7 +93,7 @@ worker "specify" {
 		}
 	}
 	require.NotNil(t, specifyBlock)
-	require.Equal(t, ".sofa/imports/design", specifyBlock.WorkerConfig.Imports["design"].Path)
+	require.Equal(t, ".sofa/imports/design", specifyBlock.WorkerConfig().Imports["design"].Path)
 
 	conflictDir := t.TempDir()
 	writePlannerFile(t, filepath.Join(conflictDir, "workflow.sofa.hcl"), workerInfrastructure+`
@@ -256,11 +256,26 @@ output "result" {
 
 	withToolDir := t.TempDir()
 	writePlannerFile(t, filepath.Join(withToolDir, "workflow.sofa.hcl"), workerInfrastructure+`
+go_tool "finish" {
+  description = "Finish specification"
+  source = <<-GO
+    import "context"
+    type Input struct {
+      Summary string `+"`json:\"summary\"`"+`
+    }
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      out := Output("done")
+      return ToolResponse[Output]{Accepted: true, Output: &out}, nil
+    }
+  GO
+}
+
 worker "specify" {
   based_source      = "main"
   model             = "test-model"
   system_prompt     = "specify"
-  terminate_tool_id = "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc"
+  terminate_tool_id = go_tool.finish.id
 }
 
 output "result" {
@@ -349,8 +364,528 @@ func planBlockDeferredExpression(t *testing.T, cfg *SofaConfig, name string) str
 	t.Helper()
 	for _, vertex := range cfg.GetVertices() {
 		if block, ok := vertex.(*workerspec.WorkerBlock); ok && block.Name() == name {
-			return block.WorkerConfig.DeferredExpression
+			return block.WorkerConfig().DeferredExpression
 		}
 	}
 	return ""
+}
+
+func TestWorkerToolAndMCPRegistrationChecks(t *testing.T) {
+	tests := []struct {
+		name string
+		hcl  string
+	}{
+		{
+			name: "unregistered tool_ids",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "sys"
+  tool_ids      = ["tool_go_tool_missing_123"]
+}`,
+		},
+		{
+			name: "unregistered terminate_tool_id",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source      = "main"
+  model             = "test-model"
+  system_prompt     = "sys"
+  terminate_tool_id = "tool_go_tool_missing_123"
+}`,
+		},
+		{
+			name: "unregistered tool_use tool_id",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "sys"
+  tool_use "u" {
+    tool_id = "tool_go_tool_missing_123"
+  }
+}`,
+		},
+		{
+			name: "unregistered qc tool_ids",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source  = "main"
+  model             = "test-model"
+  system_prompt = "sys"
+  qc {
+    criteria = { a = "b" }
+    tool_ids = ["tool_go_tool_missing_123"]
+  }
+}`,
+		},
+		{
+			name: "unregistered mcp_tool_ids",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "sys"
+  mcp_tool_ids  = ["mcp_tool_missing_123"]
+}`,
+		},
+		{
+			name: "unregistered mcp_resource_ids",
+			hcl: workerInfrastructure + `
+worker "w" {
+  based_source     = "main"
+  model            = "test-model"
+  system_prompt    = "sys"
+  mcp_resource_ids = ["mcp_resource_missing_123"]
+}`,
+		},
+		{
+			name: "tool_use input unknown field fails InputConstraint",
+			hcl: workerInfrastructure + `
+external_tool "check" {
+  description = "check"
+  program     = ["check"]
+  input_type  = object({ target = string })
+  output_type = string
+}
+
+worker "w" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "sys"
+  tool_use "u" {
+    tool_id = external_tool.check.id
+    input = {
+      typo = "x"
+    }
+  }
+}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), tt.hcl)
+			cfg := newTestPlanner(t, dir, nil)
+			initPlanner(t, cfg, dir)
+			require.Error(t, cfg.RunPlan())
+		})
+	}
+}
+
+func TestWorkerSourceURLResolutionAndMultiSourceAmbiguity(t *testing.T) {
+	multiDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(multiDir, "workflow.sofa.hcl"), workerInfrastructure+`
+source "one" {
+  url    = "https://github.com/example/one.git"
+  branch = "main"
+}
+
+source "two" {
+  url    = "https://github.com/example/two.git"
+  branch = "main"
+}
+
+worker "ambiguous" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "sys"
+}
+`)
+	cfg := newTestPlanner(t, multiDir, nil)
+	initPlanner(t, cfg, multiDir)
+	require.ErrorContains(t, cfg.RunPlan(), "source")
+
+	chainDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(chainDir, "workflow.sofa.hcl"), workerInfrastructure+`
+source "one" {
+  url    = "https://github.com/example/one.git"
+  branch = "main"
+}
+
+source "two" {
+  url    = "https://github.com/example/two.git"
+  branch = "main"
+}
+
+locals {
+  base_branch = source.two.branch
+  next_branch = worker.specify.work_branch
+}
+
+worker "specify" {
+  based_source  = local.base_branch
+  model         = "test-model"
+  system_prompt = "specify"
+}
+
+worker "plan" {
+  based_source  = local.next_branch
+  model         = "test-model"
+  system_prompt = "plan"
+}
+`)
+	cfg = newTestPlanner(t, chainDir, nil)
+	initPlanner(t, cfg, chainDir)
+	require.NoError(t, cfg.RunPlan())
+	for _, vertex := range cfg.GetVertices() {
+		if wb, ok := vertex.(*workerspec.WorkerBlock); ok {
+			require.Equal(t, "https://github.com/example/two.git", wb.WorkerConfig().SourceURL)
+		}
+	}
+}
+
+func TestWorkerFallbackLocalsTransitivityAndForEachInstances(t *testing.T) {
+	// Locals transitive positive ancestry must succeed.
+	localsDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(localsDir, "workflow.sofa.hcl"), workerInfrastructure+`
+worker "tasks" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "tasks"
+}
+
+locals {
+  tasks_branch = worker.tasks.work_branch
+}
+
+worker "implement" {
+  based_source  = local.tasks_branch
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.tasks
+  }
+}
+`)
+	cfg := newTestPlanner(t, localsDir, nil)
+	initPlanner(t, cfg, localsDir)
+	require.NoError(t, cfg.RunPlan())
+
+	// Target attribute suffix must fail.
+	attrSuffixDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(attrSuffixDir, "workflow.sofa.hcl"), workerInfrastructure+`
+worker "tasks" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "tasks"
+}
+
+worker "implement" {
+  based_source  = worker.tasks.work_branch
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.tasks.work_branch
+  }
+}
+`)
+	cfg = newTestPlanner(t, attrSuffixDir, nil)
+	loaded, diags, err := config.LoadDirectoryContext(context.Background(), attrSuffixDir)
+	require.NoError(t, err)
+	require.False(t, diags.HasErrors(), diags.Error())
+	err = cfg.Init(loaded.Blocks)
+	if err == nil {
+		err = cfg.RunPlan()
+	}
+	require.Error(t, err)
+
+	// for_each instance fallback: linux is ancestor, windows is NOT.
+	forEachOKDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(forEachOKDir, "workflow.sofa.hcl"), workerInfrastructure+`
+worker "matrix" {
+  for_each      = toset(["linux", "windows"])
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "matrix ${each.key}"
+}
+
+worker "implement" {
+  based_source  = worker.matrix["linux"].work_branch
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.matrix["linux"]
+  }
+}
+`)
+	cfg = newTestPlanner(t, forEachOKDir, nil)
+	initPlanner(t, cfg, forEachOKDir)
+	require.NoError(t, cfg.RunPlan())
+
+	// depends_on positive ancestry must succeed.
+	dependsOnDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dependsOnDir, "workflow.sofa.hcl"), workerInfrastructure+`
+worker "tasks" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "tasks"
+}
+
+worker "implement" {
+  depends_on    = [worker.tasks]
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.tasks
+  }
+}
+`)
+	cfg = newTestPlanner(t, dependsOnDir, nil)
+	initPlanner(t, cfg, dependsOnDir)
+	require.NoError(t, cfg.RunPlan())
+
+	// Non-worker intermediate block transitive ancestry (worker.tasks -> preserve.checkpoint -> worker.implement) must succeed.
+	nonWorkerTransitiveDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(nonWorkerTransitiveDir, "workflow.sofa.hcl"), workerInfrastructure+`
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+
+worker "tasks" {
+  based_source  = source.project.branch
+  model         = "test-model"
+  system_prompt = "tasks"
+}
+
+preserve "checkpoint" {
+  branch = worker.tasks.work_branch
+}
+
+worker "implement" {
+  depends_on    = [preserve.checkpoint]
+  based_source  = source.project.branch
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.tasks
+  }
+}
+`)
+	cfg = newTestPlanner(t, nonWorkerTransitiveDir, nil)
+	initPlanner(t, cfg, nonWorkerTransitiveDir)
+	require.NoError(t, cfg.RunPlan())
+
+	// for_each instance fallback: linux is ancestor, windows is NOT.
+	forEachBadDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(forEachBadDir, "workflow.sofa.hcl"), workerInfrastructure+`
+worker "matrix" {
+  for_each      = toset(["linux", "windows"])
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "matrix ${each.key}"
+}
+
+worker "implement" {
+  based_source  = worker.matrix["linux"].work_branch
+  model         = "test-model"
+  system_prompt = "implement"
+
+  fallback "rework" {
+    on     = ["qc_exhausted"]
+    target = worker.matrix["windows"]
+  }
+}
+`)
+	cfg = newTestPlanner(t, forEachBadDir, nil)
+	loaded, diags, err = config.LoadDirectoryContext(context.Background(), forEachBadDir)
+	require.NoError(t, err)
+	require.False(t, diags.HasErrors(), diags.Error())
+	err = cfg.Init(loaded.Blocks)
+	if err == nil {
+		err = cfg.RunPlan()
+	}
+	require.Error(t, err)
+}
+
+func TestWorkerDynamicGatekeeperAndFourStageEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+}
+
+harness "copilot" {}
+harness "antigravity" {}
+
+model_provider "openai" {
+  type     = "openai"
+  endpoint = "https://api.example.com/v1"
+}
+
+mcp_server "docs" {
+  tools     = ["search"]
+  resources = ["docs://readme"]
+  http {
+    url = "https://mcp.example.com/mcp"
+  }
+}
+
+go_tool "verify_done" {
+  description = "Verify completion"
+  source = <<-GO
+    import "context"
+    type Input struct {
+      Note string `+"`json:\"note\"`"+`
+    }
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      out := Output("ok")
+      return ToolResponse[Output]{Accepted: true, Output: &out}, nil
+    }
+  GO
+}
+
+worker "specify" {
+  based_source  = source.project.branch
+  harness       = harness.copilot
+  model         = "gpt-5"
+  system_prompt = "Write spec"
+
+  artifact "spec" {
+    type        = "file"
+    path        = "docs/spec.md"
+    description = "spec"
+  }
+}
+
+worker "plan" {
+  based_source  = worker.specify.work_branch
+  harness       = harness.copilot
+  model         = "gpt-5"
+  system_prompt = "Write plan"
+  prompt        = "Read ${import_artifact.spec.path} and write ${artifact("design").path}"
+
+  import_artifact "spec" {
+    desc    = "approved spec"
+    sources = [worker.specify.artifact.spec]
+  }
+
+  artifact "design" {
+    type        = "file"
+    path        = "docs/design.md"
+    description = "design"
+  }
+}
+
+worker "tasks" {
+  based_source  = worker.plan.work_branch
+  harness       = harness.copilot
+  model         = "gpt-5"
+  system_prompt = "Write tasks"
+  prompt        = "Read ${import_artifact.design.path}"
+
+  import_artifact "design" {
+    desc    = "approved design"
+    sources = [worker.plan.artifact.design]
+  }
+}
+
+worker "implement" {
+  based_source            = worker.tasks.work_branch
+  harness                 = harness.antigravity
+  model_provider          = null
+  model                   = "gemini-2.5-pro"
+  system_prompt           = "Implement tasks"
+  prompt                  = "Read ${import_artifact.design.path}"
+  mcp_tool_ids            = [mcp_server.docs.tool_ids["search"]]
+  mcp_resource_ids        = [mcp_server.docs.resource_ids["docs://readme"]]
+  tool_call_quota         = { bash = 50 }
+  checkpoint_every_rounds = 5
+  max_protocol_attempts   = 10
+
+  tool_use "done" {
+    tool_id   = go_tool.verify_done.id
+    terminate = true
+    input = {
+      note = "final"
+    }
+  }
+
+  import_artifact "design" {
+    desc    = "design"
+    sources = [worker.plan.artifact.design]
+  }
+
+  artifact "test_report" {
+    type        = "file"
+    path        = "reports/test.json"
+    description = "test summary"
+  }
+
+  dynamic "gatekeeper" {
+    for_each = toset(["unit"])
+    content "unit" {
+      command = ["go", "test", "./..."]
+    }
+  }
+
+  retry {
+    lifecycle_retries  = 3
+    model_call_retries = 2
+    interval_seconds   = 5
+  }
+
+  qc {
+    harness        = harness.copilot
+    model_provider = model_provider.openai
+    model          = "gpt-5"
+    criteria       = { tests = "all tests pass" }
+  }
+
+  fallback "rework_tasks" {
+    on        = ["qc_exhausted", "gatekeeper_exhausted"]
+    target    = worker.tasks
+    artifacts = [artifact("test_report")]
+  }
+}
+
+preserve "final_impl" {
+  branch = worker.implement.work_branch
+}
+
+output "final_result" {
+  value = worker.implement.result
+}
+`)
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+
+	var impl *workerspec.WorkerBlock
+	for _, vertex := range cfg.GetVertices() {
+		if wb, ok := vertex.(*workerspec.WorkerBlock); ok && wb.Name() == "implement" {
+			impl = wb
+		}
+	}
+	require.NotNil(t, impl)
+	wc := impl.WorkerConfig()
+	require.Equal(t, "https://github.com/example/sofa.git", wc.SourceURL)
+	require.Len(t, wc.Gatekeepers, 1)
+	require.Equal(t, "unit", wc.Gatekeepers[0].Name)
+	require.NotNil(t, wc.QC)
+	require.True(t, wc.QC.ModelProviderSet)
+	require.Len(t, wc.Fallbacks, 1)
+	require.Equal(t, []string{"test_report"}, wc.Fallbacks[0].Artifacts)
+	require.NotEmpty(t, wc.DeferredExpression)
 }

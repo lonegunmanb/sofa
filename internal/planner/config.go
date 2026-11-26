@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/hcl/v2"
@@ -202,4 +203,103 @@ func (c *SofaConfig) Outputs() []modulespec.Output {
 	return outputs
 }
 
+func (c *SofaConfig) LookupRegisteredTool(id string) (workerspec.ModuleToolInfo, bool) {
+	for _, b := range golden.Blocks[*toolspec.GoToolBlock](c) {
+		if b.Id() == id {
+			return workerspec.ModuleToolInfo{
+				ID:         id,
+				InputType:  b.InputConstraint().Type(),
+				OutputType: b.OutputConstraint().Type(),
+			}, true
+		}
+	}
+	for _, b := range golden.Blocks[*toolspec.ExternalToolBlock](c) {
+		if b.Id() == id {
+			return workerspec.ModuleToolInfo{
+				ID:         id,
+				InputType:  b.InputConstraint().Type(),
+				OutputType: b.OutputConstraint().Type(),
+			}, true
+		}
+	}
+	return workerspec.ModuleToolInfo{}, false
+}
+
+func (c *SofaConfig) HasRegisteredMCPTool(id string) bool {
+	for _, b := range golden.Blocks[*mcpspec.ServerBlock](c) {
+		for _, tool := range b.Tools {
+			if b.ToolID(tool) == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *SofaConfig) HasRegisteredMCPResource(id string) bool {
+	for _, b := range golden.Blocks[*mcpspec.ServerBlock](c) {
+		for _, res := range b.Resources {
+			if b.ResourceID(res) == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *SofaConfig) LookupSourceURL(name string) (string, bool) {
+	for _, b := range golden.Blocks[*sourcespec.SourceBlock](c) {
+		if b.Name() == name {
+			return b.SourceConfig().URL, true
+		}
+	}
+	return "", false
+}
+
+func (c *SofaConfig) SingleRootSourceURL() (string, int) {
+	sources := golden.Blocks[*sourcespec.SourceBlock](c)
+	if len(sources) == 1 {
+		return sources[0].SourceConfig().URL, 1
+	}
+	return "", len(sources)
+}
+
+func (c *SofaConfig) LookupWorkerSourceURLs(address string) ([]string, bool) {
+	if v, ok := c.GetVertices()[address]; ok {
+		if wb, isWorker := v.(*workerspec.WorkerBlock); isWorker {
+			return []string{wb.WorkerConfig().SourceURL}, true
+		}
+	}
+	if !strings.Contains(address, "[") {
+		prefix := address + "["
+		var urls []string
+		for _, wb := range golden.Blocks[*workerspec.WorkerBlock](c) {
+			if strings.HasPrefix(wb.Address(), prefix) {
+				urls = append(urls, wb.WorkerConfig().SourceURL)
+			}
+		}
+		if len(urls) > 0 {
+			return urls, true
+		}
+	}
+	return nil, false
+}
+
+func (c *SofaConfig) ResolveLocalExpr(name string) (hcl.Expression, bool) {
+	v, ok := c.GetVertices()["local."+name]
+	if !ok {
+		return nil, false
+	}
+	lb, isLocal := v.(*golden.LocalBlock)
+	if !isLocal {
+		return nil, false
+	}
+	attr, has := lb.HclBlock().Attributes()["value"]
+	if !has {
+		return nil, false
+	}
+	return attr.Expr, true
+}
+
 var _ golden.Config = (*SofaConfig)(nil)
+var _ workerspec.ModuleRegistry = (*SofaConfig)(nil)
