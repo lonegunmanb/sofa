@@ -1,0 +1,14 @@
+---
+description: "Workspace init, recursive module installer, and harness plugin locking TDD tasks"
+---
+
+# Tasks
+
+- [X] T001 Add `github.com/hashicorp/go-getter/v2` and `github.com/ProtonMail/go-crypto` dependencies to `go.mod` / `go.sum`.
+- [X] T002 [Red] Write failing unit tests in `internal/module/init_test.go` covering `Directory` address mapping/rejection, recursive local module installation, relative source resolution, replaced conflicting subdirectories, cycle detection (`a -> b -> a`, `a -> a`), invalid/duplicate/case-colliding labels, non-literal/empty `source`, symlink/non-regular file rejection, `.sofa`/`.git`/`*.sofaplan` filtering, injected `FetchFunc` & `go-getter/v2` `httptest.Server` zip download, error credential/query/fragment redaction, `Upgrade = false` cache reuse with child recursion, and `Upgrade = true` atomic swap + rollback on failure.
+- [X] T003 [Green] Implement `internal/module/init.go` (`FetchFunc`, `InitOptions`, `Init`, `Directory`, `IsLocalSource`, `Fetch`, `CopyCleanDirectory`) passing all `internal/module` tests.
+- [X] T004 [Red] Write failing unit tests in `internal/harness/lock_test.go` covering local-mode zero network calls, static metadata enforcement while allowing `var.*`/`local.*` in `options`/`env_refs`, cross-module local/remote/version/signature conflicts and compatible policy merging (`attestation` > `auto`, `pgp` > `auto`, any > `none`), `ResolveGitHubToken` host normalization and `GITHUB_TOKEN` fallback, strict `checksums.txt` parsing (including hyphen/underscore harness names and `linux_amd64`/`linux_arm64` requirement), all 4 signature modes (`none`, `pgp` with generated OpenPGP keys & tampered checksums rejection, `attestation`, `auto` attestation/PGP-fallback/failure), default `net/http` `ReleaseFetcher` & `AttestationVerifier` against `httptest.Server`, `!Upgrade` lockfile cache reuse, and deterministic `0600` `plugins.lock.json` output.
+- [X] T005 [Green] Implement `internal/harness/lock.go` passing all `internal/harness` tests.
+- [X] T006 [Red] Write failing unit tests in `internal/project/project_test.go` covering `Init`/`Open`/`OpenProject` lifecycle, `.sofa`/`.git`/`*.sofaplan` skipping, source-inside-state rejection, symlink/non-regular file rejection, snapshot isolation after source edits, remote URL credential/query/fragment redaction in `state.json` and errors, `httptest.Server` zip init, `SaveOutputs`/`ReadOutputs` validation and reset on re-init, `.initializing` lock enforcement on `module.Init` / `harness.LockPlugins` failure, and interrupted initialization recovery.
+- [X] T007 [Green] Implement `internal/project/project.go` and `internal/project/state.go` passing all `internal/project` tests.
+- [X] T008 [Refactor & Verify] Review diffs for duplication/handle leaks, run `gofmt -l .`, `go vet ./...`, and `go test ./... -count=1`, and update `tasks.md` checkboxes `[X]`.
