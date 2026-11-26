@@ -1,7 +1,7 @@
 # 阶段一（Stage 1）开发总纲：离线 HCL 配置与 `.sofaplan` 编译器
 
 > **面向后续开发 Agent 的强制阅读说明**：
-> 阶段一包含 **7 个严格按序递进的微切片（`001`–`007`）**。在为任一切片执行 `/speckit-specify`、`/speckit-plan`、`/speckit-tasks` 或 `/speckit-implement` 之前，**必须完整阅读本总纲以及对应编号的分片设计文档**，严格按文档给定的包路径、结构体签名、`golden` 接口约定与必测 Red 用例落地，**严禁自行发明替代架构或合并多个分片**。
+> 阶段一包含 **按序递进的微切片（`001`–`009`，含 `004b`）**。在为任一切片执行 `/speckit-specify`、`/speckit-plan`、`/speckit-tasks` 或 `/speckit-implement` 之前，**必须完整阅读本总纲以及对应编号的分片设计文档**，严格按文档给定的包路径、结构体签名、`golden` 接口约定与必测 Red 用例落地，**严禁自行发明替代架构或合并多个分片**。
 
 ---
 
@@ -19,13 +19,13 @@
 
 ## 2. 阶段一统一源码目录布局
 
-所有 7 个分片共同演进以下目录结构，**禁止随意改名或另起炉灶创建平级重复包**：
+所有阶段一分片共同演进以下目录结构，**禁止随意改名或另起炉灶创建平级重复包**：
 
 ```text
 sofa/
 ├── cmd/
 │   └── sofa/
-│       └── main.go                 # [007] CLI 入口 (sofa init / sofa plan / sofa schema)
+│       └── main.go                 # [009] CLI 入口 (sofa init / sofa plan / sofa schema)
 ├── internal/
 │   ├── spec/                       # [001+] 基础共享原语：Sensitive 标记、Condition、cty 类型校验、BranchRef
 │   ├── config/                     # [001+] *.sofa.hcl 扫描加载、golden.BaseConfig 封装、内置 HCL 函数、Root 单例预处理
@@ -35,6 +35,7 @@ sofa/
 │   ├── sandbox/
 │   │   └── spec/                   # [003, 004b] sandbox "<name>" 块配置模型与校验（默认 bridge 网络）
 │   ├── harness/
+│   │   ├── lock.go                 # [007] tflint 风格 GitHub Release 验签与 .sofa/plugins.lock.json 生成
 │   │   └── spec/                   # [004b] harness "<name>" 插件声明块（对齐 tflint，正交于 model_provider）
 │   ├── tool/
 │   │   ├── gotool/                 # [004] go_tool 内联 Go 源码 AST 与类型签名分析
@@ -43,11 +44,14 @@ sofa/
 │   │   └── spec/                   # [005, 006] worker 与 dynamic_worker 块、嵌套块及延迟表达式求值
 │   ├── merge/
 │   │   └── spec/                   # [006] 纯确定性 merge "<name>" 块
+│   ├── project/                    # [007] .sofa 状态目录、config/modules 事务化快照与 state.json
 │   ├── module/
 │   │   ├── init.go                 # [007] 本地目录复制与 go-getter 模块安装 (.sofa/modules)
-│   │   └── spec/                   # [007] module "<name>" 与 output "<name>" 块（output 在 001 先建立）
-│   ├── plan/                       # [007] 不可变 Plan 模型、ctyjson+ctymsgpack 编解码、脱敏展示、.sofaplan ZIP 打包
-│   └── planner/                    # [001->007 逐步扩展] SofaConfig（实现 golden.Config），串联所有块的注册与快照导出
+│   │   └── spec/                   # [001, 008] Output 快照与 module "<name>" 递归规划块
+│   ├── plan/                       # [009] 不可变 Plan 模型、ctyjson+ctymsgpack 编解码、脱敏展示、.sofaplan ZIP 打包
+│   ├── variableschema/             # [009] 根模块 variable 契约导出 (sofa schema)
+│   ├── cli/                        # [009] Cobra CLI 命令实现
+│   └── planner/                    # [001->009 逐步扩展] SofaConfig（实现 golden.Config），串联所有块的注册与快照导出
 ```
 
 ---
@@ -114,7 +118,9 @@ sofa/
 | **004b** | [004b-harness-and-sandbox-bridge.md](./004b-harness-and-sandbox-bridge.md) | `harness "<name>"` 插件块（对齐 `tflint`，正交于 `model_provider`）、`RootDefaults.Harnesses`、`sandbox.network` 默认 `"bridge"` | 003 |
 | **005** | [005-static-worker.md](./005-static-worker.md) | `worker "<name>"`（正交绑定 `sandbox`/`harness`/`model_provider`、`for_each`、`artifact`、`import_artifact`、`tool_use`、`gatekeeper`、`qc`、`fallback` 及延迟表达式） | 002, 003, 004, 004b |
 | **006** | [006-dynamic-worker-and-merge.md](./006-dynamic-worker-and-merge.md) | `dynamic_worker "<name>"`（含 `iterator`）与纯确定性 `merge "<name>"` | 005 |
-| **007** | [007-modules-sofaplan-and-cli.md](./007-modules-sofaplan-and-cli.md) | `sofa init`（含 `tflint` 风格 Harness 插件验签与 `.sofa/plugins.lock.json` 跨平台哈希锁定）、`module` 递归规划、`.sofaplan` ZIP 归档编解码、`sofa plan` / `sofa schema` CLI | 006 |
+| **007** | [007-init-and-plugin-lock.md](./007-init-and-plugin-lock.md) | `internal/project`（`.sofa` 事务快照与 `state.json`）、`internal/module/init.go`（递归模块安装与防环）、`internal/harness/lock.go`（对齐 `tflint` 的 Release 验签与 `plugins.lock.json` 跨平台锁定） | 006 |
+| **008** | [008-module-recursive-planning.md](./008-module-recursive-planning.md) | `ModuleBlock` 递归规划、跨模块类型化 `UnknownVal` 输入透传、Root 单例（`sandbox`/`harness`/`model_provider`）正交向下继承、`CanonicalAddress` 与 Bundle 相对 `path.module` | 007 |
+| **009** | [009-sofaplan-and-cli.md](./009-sofaplan-and-cli.md) | 不可变 `Plan` 导出与无损编解码、脱敏 `Display`、自包含 `.sofaplan` ZIP 归档（含防篡改与 Zip-Slip 防御）、`variableschema` 与 `sofa init`/`schema`/`plan` CLI | 008 |
 
 ### 已完成的上游跟进收口记录
 
