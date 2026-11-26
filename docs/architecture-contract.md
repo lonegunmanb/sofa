@@ -57,6 +57,8 @@ flowchart TB
 - **容器内部**：不可信沙箱边界，按 `writable_paths` 限制项目卷读写范围，其他目录（`/tmp`、`$HOME` 等）容器私有隔离；**绝不持有 Git 推送密钥或 Dapr 访问权，绝不允许调用任何宿主机命令**。
 
 ### 4.2 基于 `hashicorp/go-plugin`（gRPC）的多语言 Agent Harness 架构与 `tflint` 风格安装
+
+> 完整的 Protobuf 服务定义（`proto/sofa/harness/v1/harness.proto`）、双向流帧结构、宿主/插件职责切分及与 `r42`（`copilot-sdk/go`）和 `google-antigravity` 的逐字段映射，详见 [harness-plugin-contract.md](./harness-plugin-contract.md)。
 - **插件通信与密码学防越权（`go-plugin` + `AutoMTLS` + `RunnerFunc`）**：
   - `sofa` 不绑定单一语言 Agent SDK，而是基于 `github.com/hashicorp/go-plugin`（`ProtocolGRPC`）接入任意语言的 `AgentHarness` 插件：通过自定义 `ClientConfig.RunnerFunc` 在目标 `sandbox` 容器内启动插件进程（插件作为 gRPC Server，宿主机 `sofa-worker` 作为 gRPC Client），走宿主机与容器共享私有目录的 **Unix Domain Socket**（`/.sofa/plugin/harness.sock`）。
   - 强制开启 **`AutoMTLS: true`**：客户端私钥仅驻留于宿主机 `sofa-worker` 内存，容器内插件启动完成握手后立即清理 `PLUGIN_*` 环境变量；宿主机无任何暴露给容器的监听端口，容器内 `bash` 派生的任何恶意子进程无宿主机客户端私钥，从 TLS 层彻底阻断伪造调用。
