@@ -481,3 +481,31 @@ type Opener interface {
 | **流式事件与 Token 统计** | `session.On(...)` 转发 `AssistantMessageDelta`、`AssistantReasoningDelta`、`AssistantUsage`、`ToolExecutionStart/Progress/ShellOutput/Complete`、`Subagent*` | 并发迭代 `response`（文本增量）、`response.thoughts`（思考增量）与 `response.tool_calls`（工具事件）写出 `SessionEvent` |
 | **`AbortTurn` & `ResumeSession`** | 分别调用 `session.Abort(ctx)` 与 `Disconnect()` + `client.ResumeSession(ctx, sessionID, resumeConfig)` | `AbortTurn` 取消当前轮次 `asyncio.Task`；`ResumeSession` 校验或重建底层会话句柄 |
 | **错误分类归一化** | 读取 `sdk.SessionErrorData{ErrorType, StatusCode}`（`rate_limit` → `RATE_LIMIT`；`authentication`/`authorization`/`quota`/`context_limit` 逐一对应） | 捕获 SDK/HTTP 异常状态码（429/401/403/400 token limit）映射至对应 `ErrorCategory` |
+
+---
+
+## 7. 同仓隔离孵化与零摩擦拆仓策略（In-Repo Incubation → Standalone Split）
+
+在 `harness.proto` 接口与全链路业务尚未完全稳定前，为避免每次微调协议都跨多个仓库发版联调，同时**坚守 `sofa` 引擎零内置特例、零内部耦合**的铁律，采用**“物理同仓孵化、编译与运行期严格外部化”**布局：
+
+```text
+sofa/
+├── go.mod                                  # 主模块 github.com/lonegunmanb/sofa（绝不引入 copilot-sdk/go 等厂商依赖）
+├── proto/sofa/harness/v1/harness.proto     # 唯一协议真源
+├── pkg/harnessplugin/                      # 公开 Go 插件 SDK 与 Protobuf 桩（零 internal/ 依赖）
+└── plugins/                                # 官方插件同仓孵化区（主仓代码严禁 import 此目录！）
+    ├── sofa-harness-copilot/
+    │   ├── go.mod                          # 独立 Go Module: github.com/lonegunmanb/sofa-harness-copilot
+    │   │                                   # 孵化期通过 replace github.com/lonegunmanb/sofa => ../.. 引用公开 pkg/harnessplugin
+    │   └── cmd/sofa-harness-copilot/
+    └── sofa-harness-antigravity/
+        ├── pyproject.toml                  # 独立 Python 工程: sofa-harness-antigravity (依赖 google-antigravity + grpcio)
+        └── src/sofa_harness_antigravity/
+```
+
+### 三大工程收益
+1. **单提交原子演进**：修改 `harness.proto` 后，在同一提交内即可同步更新 `pkg/harnessplugin`、`plugins/sofa-harness-copilot` 与 `plugins/sofa-harness-antigravity`，直接跑通双栈集成测试。
+2. **编译器级防耦合（零特例不破功）**：
+   - `plugins/sofa-harness-copilot/go.mod` 从第一天起就使用最终独立模块名 `github.com/lonegunmanb/sofa-harness-copilot`，Go 编译器从语法层**强制禁止其引用 `sofa/internal/...`**；
+   - 运行与测试时，构建脚本将两个插件输出到 `<plugin_dir>/sofa-harness-copilot` 与 `<plugin_dir>/sofa-harness-antigravity`，`sofa` 100% 走标准本地外部插件目录（省略 `source`/`version`）拉起容器内 `go-plugin` 进程，主程序内无任何特权分支。
+3. **五分钟无损拆仓**：待业务全链路跑通、`harness.proto` 稳定冻结后，直接将 `plugins/sofa-harness-copilot` 与 `plugins/sofa-harness-antigravity` 迁出为独立仓库，仅需删掉 `go.mod` 中的一行 `replace`（及调整 `protoc` 脚本路径）即可直接配置 GitHub Releases 发布流水线，业务代码零改动。

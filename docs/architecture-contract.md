@@ -65,8 +65,8 @@ flowchart TB
 - **极简原生 gRPC 双向流契约（免除 Python/非 Go 插件的 `GRPCBroker` 负担）**：
   - `AgentHarness` 服务仅定义 `OpenSession`、`RunTurn(stream HostTurnFrame) returns (stream PluginTurnFrame)`、`CloseSession` 三个方法（配合 `go-plugin` 标准 `Health` / `GRPCController` / `GRPCStdio`）：
   - 单轮对话复用同一条原生双向流推送 `ThoughtDelta`/`TextDelta`，并在内置工具执行前向宿主机发起 `PreToolUseCheck` 询问，在模型调用 `sofa_*` 协议工具或 `go_tool` 时向宿主机发起 `InvokeHostTool` 请求。
-- **对齐 `tflint` 的纯粹外部插件来源与跨平台锁定机制（零内置特例）**：
-  - `sofa` 核心仓不内置任何特定厂商的 Agent SDK（`sofa-harness-copilot`、`sofa-harness-antigravity` 等全部作为独立仓库一等公民对待），仅支持以下两种统一来源：
+- **对齐 `tflint` 的纯粹外部插件来源、同仓隔离孵化与跨平台锁定机制（零内置特例）**：
+  - `sofa` 核心引擎不内置任何特定厂商的 Agent SDK（`sofa-harness-copilot`、`sofa-harness-antigravity` 等在运行期全部作为标准外部插件一视同仁加载；在 `harness.proto` 演进稳定期，两者置于本仓 `plugins/sofa-harness-<name>/` 独立子模块/子工程中同仓孵化以便单提交联调，待全业务跑通稳定后再拆分为独立 GitHub 仓库），支持以下两种统一加载来源：
   1. **GitHub Releases 自动下载验签（声明 `source` + `version`）**：独立插件仓库发布包遵循 `v{version}` Tag 与 `sofa-harness-{name}_{os}_{arch}.zip` + `checksums.txt` 规范，支持 `signature = "auto" | "attestation" | "pgp" | "none"`（优先验 GitHub OIDC Artifact Attestations，回退 PGP `signing_key`）及 `GITHUB_TOKEN` / `GITHUB_TOKEN_<normalized_host>`。`sofa init` 验签后将全平台 SHA-256 锁定写入 `.sofa/plugins.lock.json` 随 `.sofaplan` 分发；无论宿主机是 Windows、macOS 还是 Linux，`sofa-worker` 均按目标容器 `linux/<arch>` 缓存并核对锁定哈希后将整个插件目录（含入口 `sofa-harness-{name}` 及自包含运行时）只读挂载至容器 `/.sofa/harness/`。
   2. **本地插件目录发现（同时省略 `source` 与 `version`，用于开发调试或离线环境）**：按 `--plugin-dir` > `SOFA_PLUGIN_DIR` > `./.sofa/plugins` > `~/.sofa/plugins` 查找面向目标容器架构的本地插件 `sofa-harness-{name}`。
 
