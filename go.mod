@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/ProtonMail/go-crypto v1.5.2
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-getter/v2 v2.2.5
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/hcl/v2 v2.25.0
@@ -37,7 +38,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/consul/api v1.25.1 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
