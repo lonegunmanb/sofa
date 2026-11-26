@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -d "$SELF_DIR/../src" ]; then
+  export PYTHONPATH="$SELF_DIR/../src${PYTHONPATH:+:$PYTHONPATH}"
+fi
+if [ -x "$SELF_DIR/python/bin/python3" ]; then
+  exec "$SELF_DIR/python/bin/python3" -m sofa_harness_antigravity "$@"
+fi
+exec python3 -m sofa_harness_antigravity "$@"

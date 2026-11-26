@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sofa-harness-antigravity"
+version = "0.1.0"
+description = "External hashicorp/go-plugin gRPC AgentHarness plugin for Google Antigravity SDK"
+requires-python = ">=3.12"
+dependencies = [
+  "grpcio>=1.70.0",
+  "grpcio-health-checking>=1.70.0",
+  "protobuf>=7.36.2",
+  "cryptography>=44.0.0",
+  "google-antigravity>=0.1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.25.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src", "src/sofa_harness_antigravity/proto"]

@@ -1,0 +1,3 @@
+# Enforce pure LF line endings for POSIX container scripts even on Windows checkouts.
+plugins/sofa-harness-antigravity/bin/* text eol=lf
+*.sh text eol=lf
