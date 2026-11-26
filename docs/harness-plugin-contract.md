@@ -37,16 +37,23 @@
 - `PluginMap` 键名: `"agent_harness"`
 - 传输协议: 仅允许 `plugin.ProtocolGRPC`，强制 `AutoMTLS: true`
 
-### 2.2 容器内标准挂载布局
-宿主机 `sofa-worker` 通过自定义 `plugin.ClientConfig.RunnerFunc` 拉起沙箱容器，容器内固定路径约定如下：
+### 2.2 容器内标准挂载布局与跨平台传输
+宿主机 `sofa-worker` 通过自定义 `plugin.ClientConfig.RunnerFunc`（`--init --rm --entrypoint /.sofa/harness/sofa-harness-<name>`，禁用用户自定义 `sandbox.entrypoint`）直接以插件进程作为沙箱容器入口启动：
+- **Linux 宿主机**：挂载 `0700` 共享目录 `/.sofa/plugin/`，走 Unix Domain Socket `/.sofa/plugin/harness.sock` + `AutoMTLS: true`；
+- **Windows / macOS 宿主机（Podman Machine 虚拟机）**：走 `-p 127.0.0.1::19500` 本地回环随机端口映射 + `AutoMTLS: true`（不支持 `sandbox.network = "none"`）。
+
+容器内固定挂载路径约定如下：
 
 | 容器内路径 | 权限 | 用途说明 |
 | :--- | :---: | :--- |
-| `/.sofa/harness/` | `ro` | 解压并核验过 `plugins.lock.json` 锁定 SHA-256 的目标容器架构（`linux/<arch>`）插件包目录，可执行入口固定为 `/.sofa/harness/sofa-harness-<name>` |
-| `/.sofa/plugin/` | `rw` | 宿主机为当前容器独占创建的 `0700` 临时目录，插件在此绑定 Unix Domain Socket `/.sofa/plugin/harness.sock` |
-| `/.sofa/session-store/` | `rw` | 容器私有会话存储目录（供 Copilot CLI 等保存同容器 `ResumeSession` 所需的会话事件状态） |
+| `/.sofa/harness/` | `ro` | 自包含目标容器架构（`linux/<arch>`）外部插件目录（含独立 Linux 运行时），入口固定为 `/.sofa/harness/sofa-harness-<name>` |
+| `/.sofa/plugin/` | Linux `rw` (`0700`) | Linux 下绑定 Unix Domain Socket `/.sofa/plugin/harness.sock` |
+| `/.sofa/tools/` | `ro` | 宿主机交叉编译好的静态 Linux `go_tool` 可执行文件（经 `podman exec -i` 调用） |
+| `/.sofa/session-store/` | `rw` | 容器私有会话存储目录（供跨返工轮次 `ResumeSession` 恢复事件状态） |
 | `/.sofa/bundle/` | `ro` | `.sofaplan` 解压的静态资源快照（如 `${path.module}/skills`） |
-| `/workspace` | 按策略 | 项目代码工作树（Work 容器按 `writable_paths` 限制可写范围；QC 容器整体 `ro` 只读挂载） |
+| `/.sofa/imports/` | `ro` | 从共享 `BlobStore` 校验还原的上游 `import_artifact` 内容 |
+| `/.sofa/artifacts/` | Work `rw` / QC `ro` | 当前工序声明的非 Git `artifact` 产出目录（独立于 `/workspace`） |
+| `/workspace` | 按策略（`.git` 始终 `ro`） | 纯净 Git 代码工作树（Work 按 `writable_paths` 挂载并在交卷前经宿主 Diff 门禁核验；QC 整体 `ro` 只读冻结） |
 
 ---
 

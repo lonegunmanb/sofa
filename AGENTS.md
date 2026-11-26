@@ -7,7 +7,10 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 1. **Engineering Governance**: `.specify/memory/constitution.md` (binding principles and quality gates).
 2. **System Vision & Domain Concepts**: `README.md` (design overview).
 3. **Frozen Skeleton Contracts**: `docs/hcl-contract.md` (HCL blocks, orthogonal `sandbox`/`harness`/`model_provider` singleton defaults, `gatekeeper`, `merge`), `docs/architecture-contract.md` (Dapr Actor topology, `daprd` standalone/distributed parity, `hashicorp/go-plugin` gRPC Harness boundary & Session tool gates, `tflint`-style plugin installation, Epoch checkpoint branches, REST + WebSocket API), and `docs/harness-plugin-contract.md` (`proto/sofa/harness/v1/harness.proto` 7-RPC schema, `RunTurn` bidirectional stream, `r42`-parity hooks/quota/watchdog/retry split, and 1:1 `copilot` / `antigravity` SDK mapping).
-4. **Pre-Designed Slice Blueprints**: `docs/stage1/README.md`, `docs/stage1/001-*.md` through `009-*.md`, and `004b-harness-and-sandbox-bridge.md` (detailed package layouts, `golden` pitfalls, struct contracts, and mandatory TDD cases for Stage 1 slices; MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 1 slice).
+4. **Pre-Designed Slice Blueprints**:
+   - **Stage 1 (Completed)**: `docs/stage1/README.md`, `docs/stage1/001-*.md` through `009-*.md`, and `004b-harness-and-sandbox-bridge.md`.
+   - **Stage 2 (Detailed Blueprints)**: `docs/stage2/README.md` and `docs/stage2/010-*.md` through `020-*.md` (MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 2 slice).
+   - **Stage 3 (Outline)**: `docs/stage3/README.md` (`021`–`027` distributed Dapr control plane, S3 `BlobStore`, REST/WS API, CLI `apply`, and Vue 3 dashboard).
 5. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)
