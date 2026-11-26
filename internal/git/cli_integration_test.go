@@ -290,3 +290,61 @@ func TestCLIAdapterRebaseCandidateIntegration(t *testing.T) {
 	_, rebaseApplyErr := os.Stat(filepath.Join(conflictWorkDir, ".git", "rebase-apply"))
 	require.ErrorIs(t, rebaseApplyErr, os.ErrNotExist)
 }
+
+func TestCLIAdapterPushCommitAndForceWithLeaseIntegration(t *testing.T) {
+	ctx := context.Background()
+	bareDir, seedDir, baseSHA := initBareRepoWithBaseCommit(t)
+
+	ledger := NewLedger(SourceRef{URL: bareDir, Branch: "main"})
+	adapter := NewCLIAdapter(CLIAdapterOptions{Ledger: ledger})
+
+	// Create two candidate commits locally in separate branches.
+	runTestGit(t, seedDir, "checkout", "-b", "cand1")
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "c1.txt"), []byte("c1\n"), 0o644))
+	runTestGit(t, seedDir, "add", "-A")
+	runTestGit(t, seedDir, "commit", "-m", "c1")
+	runTestGit(t, seedDir, "push", bareDir, "HEAD:refs/heads/cand1")
+
+	runTestGit(t, seedDir, "checkout", "main")
+	runTestGit(t, seedDir, "checkout", "-b", "cand2")
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "c2.txt"), []byte("c2\n"), 0o644))
+	runTestGit(t, seedDir, "add", "-A")
+	runTestGit(t, seedDir, "commit", "-m", "c2")
+	runTestGit(t, seedDir, "push", bareDir, "HEAD:refs/heads/cand2")
+
+	mergeBranch := WorkBranchName("run-push", "merge.integrate")
+	// Unregistered branch must be rejected by Ledger.
+	err := adapter.PushCommit(ctx, seedDir, bareDir, mergeBranch, baseSHA, "", AuthConfig{})
+	require.ErrorIs(t, err, ErrUnregisteredBranch)
+
+	require.NoError(t, ledger.Register(bareDir, mergeBranch, baseSHA, KindMergeBranch, "merge.integrate", 1))
+	require.NoError(t, adapter.PushCommit(ctx, seedDir, bareDir, mergeBranch, baseSHA, "", AuthConfig{}))
+
+	// Rebase cand1 onto mergeBranch and advance mergeBranch with exact expectedOldRemoteSHA.
+	rebaseDir1 := filepath.Join(t.TempDir(), "rebase1")
+	out1, err := adapter.RebaseCandidate(ctx, bareDir, mergeBranch, "cand1", rebaseDir1, AuthConfig{})
+	require.NoError(t, err)
+	require.False(t, out1.Conflicted)
+	require.Equal(t, baseSHA, out1.TargetSHA)
+	require.NoError(t, adapter.PushCommit(ctx, rebaseDir1, bareDir, mergeBranch, out1.RebasedSHA, out1.TargetSHA, AuthConfig{}))
+
+	// Stale lease (baseSHA instead of out1.RebasedSHA) must fail safely without overwriting.
+	rebaseDir2 := filepath.Join(t.TempDir(), "rebase2")
+	out2, err := adapter.RebaseCandidate(ctx, bareDir, mergeBranch, "cand2", rebaseDir2, AuthConfig{})
+	require.NoError(t, err)
+	require.False(t, out2.Conflicted)
+	require.Equal(t, out1.RebasedSHA, out2.TargetSHA)
+
+	err = adapter.PushCommit(ctx, rebaseDir2, bareDir, mergeBranch, out2.RebasedSHA, baseSHA, AuthConfig{})
+	require.Error(t, err)
+
+	tipAfterStale, err := adapter.ResolveBranchSHA(ctx, bareDir, mergeBranch, AuthConfig{})
+	require.NoError(t, err)
+	require.Equal(t, out1.RebasedSHA, tipAfterStale)
+
+	// Exact lease succeeds.
+	require.NoError(t, adapter.PushCommit(ctx, rebaseDir2, bareDir, mergeBranch, out2.RebasedSHA, out2.TargetSHA, AuthConfig{}))
+	tipAfterValid, err := adapter.ResolveBranchSHA(ctx, bareDir, mergeBranch, AuthConfig{})
+	require.NoError(t, err)
+	require.Equal(t, out2.RebasedSHA, tipAfterValid)
+}

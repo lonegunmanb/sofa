@@ -650,6 +650,50 @@ func (a *CLIAdapter) CommitAllAndPush(ctx context.Context, workspaceDir, repoURL
 	return newSHA, committed, nil
 }
 
+// PushCommit pushes commitSHA from workspaceDir to remoteBranch on repoURL.
+// When Ledger is configured, remoteBranch must already be registered.
+// When expectedOldRemoteSHA is non-empty, --force-with-lease protects against concurrent remote advances.
+func (a *CLIAdapter) PushCommit(ctx context.Context, workspaceDir, repoURL, remoteBranch, commitSHA, expectedOldRemoteSHA string, auth AuthConfig) error {
+	if strings.TrimSpace(workspaceDir) == "" {
+		return errors.New("workspace directory is required")
+	}
+	cleanURL, err := validateRepoURLForCLI(repoURL)
+	if err != nil {
+		return err
+	}
+	cleanBranch, err := validateBranchForCLI(remoteBranch)
+	if err != nil {
+		return err
+	}
+	if !IsValidCommitSHA(commitSHA) {
+		return fmt.Errorf("%w: commit_sha %q", ErrInvalidBaseSHA, commitSHA)
+	}
+	if expectedOldRemoteSHA != "" && !IsValidCommitSHA(expectedOldRemoteSHA) {
+		return fmt.Errorf("%w: expected_old_remote_sha %q", ErrInvalidBaseSHA, expectedOldRemoteSHA)
+	}
+	if a.Ledger != nil {
+		if err := a.Ledger.EnsureRegistered(cleanURL, cleanBranch); err != nil {
+			return err
+		}
+	}
+
+	env, secrets, cleanup, err := a.buildAuthEnv(auth)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	fullRef := fullBranchRef(cleanBranch)
+	refspec := commitSHA + ":" + fullRef
+	args := []string{"push"}
+	if expectedOldRemoteSHA != "" {
+		args = append(args, fmt.Sprintf("--force-with-lease=%s:%s", fullRef, expectedOldRemoteSHA))
+	}
+	args = append(args, cleanURL, refspec)
+	_, _, _, err = a.runGit(ctx, workspaceDir, env, secrets, args...)
+	return err
+}
+
 // BranchContainsSHA reports whether remoteBranch exists on repoURL, its tip headSHA, and whether
 // targetSHA equals or is an ancestor of headSHA. Missing remote branches return ("", false, nil).
 func (a *CLIAdapter) BranchContainsSHA(ctx context.Context, repoURL, remoteBranch, targetSHA string, auth AuthConfig) (string, bool, error) {

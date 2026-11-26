@@ -120,6 +120,16 @@ func (f *fakeGitAdapter) CommitAllAndPush(_ context.Context, _, _, remoteBranch,
 	return sha, committed, nil
 }
 
+func (f *fakeGitAdapter) PushCommit(_ context.Context, _, _, remoteBranch, commitSHA, _ string, _ git.AuthConfig) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.branchContains[remoteBranch] == nil {
+		f.branchContains[remoteBranch] = make(map[string]bool)
+	}
+	f.branchContains[remoteBranch][commitSHA] = true
+	return nil
+}
+
 func (f *fakeGitAdapter) BranchContainsSHA(_ context.Context, _, remoteBranch, targetSHA string, _ git.AuthConfig) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

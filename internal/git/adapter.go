@@ -25,6 +25,7 @@ type Adapter interface {
 	StatusPaths(ctx context.Context, workspaceDir string) ([]ChangedPath, error)
 	RevertPaths(ctx context.Context, workspaceDir string, paths []string) error
 	CommitAllAndPush(ctx context.Context, workspaceDir, repoURL, remoteBranch, message string, auth AuthConfig) (newSHA string, committed bool, err error)
+	PushCommit(ctx context.Context, workspaceDir, repoURL, remoteBranch, commitSHA, expectedOldRemoteSHA string, auth AuthConfig) error
 	BranchContainsSHA(ctx context.Context, repoURL, remoteBranch, targetSHA string, auth AuthConfig) (headSHA string, contains bool, err error)
 	DeleteRemoteBranch(ctx context.Context, repoURL, remoteBranch string, auth AuthConfig) error
 	RebaseCandidate(ctx context.Context, repoURL, targetBranch, candidateBranch, workDir string, auth AuthConfig) (RebaseOutcome, error)

@@ -1,0 +1,48 @@
+# Data Model: `018-worker-qc-and-merge-runner`
+
+## Core Types (`internal/worker/runner/types.go`)
+
+- **`OutcomeStatus`**: `StatusSucceeded` (`"succeeded"`), `StatusWaitingHuman` (`"waiting_human"`), `StatusFallbackTriggered` (`"fallback_triggered"`), `StatusFailed` (`"failed"`).
+- **`ApprovalTarget`**:
+  - `CommitSHA string`
+  - `ArtifactIDs []string`
+  - `Artifacts []artifact.PublishedArtifact`
+  - `ResultJSON json.RawMessage`
+- **`ApprovalRecord`**:
+  - `Approved bool`
+  - `ReturnedUpstream bool`
+  - `ReturnFallback string`
+  - `CommitSHA string`
+  - `ArtifactIDs []string`
+- **`PendingPublication`**:
+  - `CommitSHA string`
+  - `BaseSHA string`
+  - `ArtifactIDs []string`
+  - `Artifacts []artifact.PublishedArtifact`
+  - `ResultJSON json.RawMessage`
+- **`NodeOutcome`**:
+  - `Status OutcomeStatus`
+  - `WorkBranch string`
+  - `CommitSHA string`
+  - `ResultJSON json.RawMessage`
+  - `Artifacts []artifact.PublishedArtifact`
+  - `FallbackName string`
+  - `FallbackTarget string`
+  - `FallbackReason string` (`"qc_exhausted"` | `"gatekeeper_exhausted"` | `"human_returned_upstream"` | `"agent_escalated"`)
+  - `FallbackArtifacts []artifact.PublishedArtifact`
+  - `DecisionRequest *session.DecisionRequest`
+  - `PauseReason string`
+  - `PendingApproval *ApprovalTarget`
+  - `FailureReason string`
+- **`NodeControlPlane`** (interface embedding `checkpoint.NodeStateStore`):
+  - `DrainInterjections(ctx) ([]session.HumanInterjection, error)`
+  - `SaveQCLedgerSnapshot(ctx, epoch, snapshot) error`
+  - `LoadQCLedgerSnapshot(ctx) ([]byte, error)`
+  - `SavePendingPublication(ctx, epoch, pending) error`
+  - `LoadPendingPublication(ctx) (*PendingPublication, error)`
+  - `GetApproval(ctx) (*ApprovalRecord, error)`
+  - `RegisterWorkBranch(ctx, epoch, repoURL, branch, baseSHA) error`
+- **`SessionLauncher` / `SessionHandle`**:
+  - Pluggable container session launcher returning `(Opener, ContainerID, Close)` for Work and QC phases.
+- **`MergeStatus` / `MergeCandidateRequest` / `MergeCandidateResult`**:
+  - `MergeStatusSucceeded` (`"succeeded"`), `MergeStatusReworkSource` (`"rework_source"`).
