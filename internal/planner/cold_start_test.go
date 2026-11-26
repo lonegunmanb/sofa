@@ -19,8 +19,11 @@ func TestColdStartLoadOutputBeforeNewSofaConfig(t *testing.T) {
 		loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
 		require.NoError(t, err)
 		require.False(t, diags.HasErrors(), diags.Error())
-		require.Len(t, loaded.Blocks, 1)
-		require.Equal(t, []string{"", "cold_start"}, loaded.Blocks[0].Labels)
+		require.Len(t, loaded.Blocks, 2)
+		require.Equal(t, "source", loaded.Blocks[0].Type)
+		require.Equal(t, []string{"", "project"}, loaded.Blocks[0].Labels)
+		require.Equal(t, "output", loaded.Blocks[1].Type)
+		require.Equal(t, []string{"", "cold_start"}, loaded.Blocks[1].Labels)
 
 		cfg := NewSofaConfig(ConfigArgs{
 			Context:   context.Background(),
@@ -34,6 +37,11 @@ func TestColdStartLoadOutputBeforeNewSofaConfig(t *testing.T) {
 
 	dir := t.TempDir()
 	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/repo.git"
+  branch = "main"
+}
+
 output "cold_start" {
   value = "ready"
 }

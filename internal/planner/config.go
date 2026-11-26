@@ -45,7 +45,6 @@ func init() {
 func RegisterBlocks() {
 	registerBlocksOnce.Do(func() {
 		defaults.SetDefaults(&struct{}{})
-		golden.RegisterBlock(&modulespec.OutputBlock{})
 		golden.RegisterBlock(&sourcespec.SourceBlock{})
 		golden.RegisterBlock(&sourcespec.PreserveBlock{})
 		golden.RegisterBlock(&providerpkg.ModelProviderBlock{})
@@ -165,14 +164,21 @@ func (c *SofaConfig) EvalContext() *hcl.EvalContext {
 
 // Outputs returns output snapshots ordered by output name.
 func (c *SofaConfig) Outputs() []modulespec.Output {
-	vertices := c.GetVertices()
-	outputs := make([]modulespec.Output, 0)
-	for _, vertex := range vertices {
-		block, ok := vertex.(*modulespec.OutputBlock)
-		if !ok {
-			continue
+	blocks := golden.Blocks[*golden.OutputBlock](c)
+	outputs := make([]modulespec.Output, 0, len(blocks))
+	for _, block := range blocks {
+		var description *string
+		if nativeDescription := block.Description(); nativeDescription != nil {
+			value := *nativeDescription
+			description = &value
 		}
-		outputs = append(outputs, block.Output())
+		outputs = append(outputs, modulespec.Output{
+			Name:        block.Name(),
+			Value:       block.Value(),
+			Description: description,
+			Sensitive:   block.Sensitive(),
+			Expression:  block.ValueExprString(),
+		})
 	}
 	sort.Slice(outputs, func(i, j int) bool {
 		return outputs[i].Name < outputs[j].Name

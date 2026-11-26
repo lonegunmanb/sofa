@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/lonegunmanb/go-defaults v1.4.0
-	github.com/lonegunmanb/golden v0.0.0-20261006003654-0f1df693e62c
+	github.com/lonegunmanb/golden v0.0.0-20261125162047-059cc8cb0d1d
 	github.com/lonegunmanb/hclfuncs v0.12.0
 	github.com/stretchr/testify v1.12.1
 	github.com/zclconf/go-cty v1.20.0

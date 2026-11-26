@@ -70,6 +70,7 @@ output "secret" {
 	require.Len(t, outputs, 2)
 	require.Equal(t, "artifact_path", outputs[0].Name)
 	require.Equal(t, ".sofa/report.json", outputs[0].Value.AsString())
+	require.Equal(t, `".sofa/report.json"`, outputs[0].Expression)
 	require.Equal(t, "secret", outputs[1].Name)
 	require.True(t, outputs[1].Value.HasMarkDeep(golden.SensitiveMark))
 	require.Equal(t, "<sensitive>", golden.CtyValueToString(outputs[1].Value))
