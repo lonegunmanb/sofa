@@ -6,8 +6,8 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 
 1. **Engineering Governance**: `.specify/memory/constitution.md` (binding principles and quality gates).
 2. **System Vision & Domain Concepts**: `README.md` (design overview).
-3. **Frozen Skeleton Contracts**: `docs/hcl-contract.md` (HCL blocks, singleton defaults, `gatekeeper`, `merge`) and `docs/architecture-contract.md` (Dapr Actor topology, `daprd` standalone/distributed parity, Session tool gates, Epoch checkpoint branches, REST + WebSocket API).
-4. **Pre-Designed Slice Blueprints**: `docs/stage1/README.md` and `docs/stage1/001-*.md` through `007-*.md` (detailed package layouts, `golden` pitfalls, struct contracts, and mandatory TDD cases for Stage 1 slices `001`–`007`; MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 1 slice).
+3. **Frozen Skeleton Contracts**: `docs/hcl-contract.md` (HCL blocks, orthogonal `sandbox`/`harness`/`model_provider` singleton defaults, `gatekeeper`, `merge`) and `docs/architecture-contract.md` (Dapr Actor topology, `daprd` standalone/distributed parity, `hashicorp/go-plugin` gRPC Harness boundary & Session tool gates, `tflint`-style plugin installation, Epoch checkpoint branches, REST + WebSocket API).
+4. **Pre-Designed Slice Blueprints**: `docs/stage1/README.md`, `docs/stage1/001-*.md` through `007-*.md`, and `004b-harness-and-sandbox-bridge.md` (detailed package layouts, `golden` pitfalls, struct contracts, and mandatory TDD cases for Stage 1 slices; MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 1 slice).
 5. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)
@@ -43,7 +43,7 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 
 ## 5. Tech Stack & Codebase Conventions
 
-- **Backend**: Go (`go.mod` module `github.com/lonegunmanb/sofa`), `hashicorp/hcl/v2`, `github.com/lonegunmanb/golden` (HCL → DAG planning & execution engine), `github.com/github/copilot-sdk/go` (default bundled Copilot CLI agent runtime inside containers, aligned with `github.com/lonegunmanb/r42`), and `dapr/go-sdk`.
+- **Backend**: Go (`go.mod` module `github.com/lonegunmanb/sofa`), `hashicorp/hcl/v2`, `github.com/lonegunmanb/golden` (HCL → DAG planning & execution engine), `github.com/hashicorp/go-plugin` (gRPC multi-language Agent Harness plugin boundary inside containers, with `github.com/github/copilot-sdk/go` bundled as the default `"copilot"` harness and `tflint`-style external harness installation for Python `google-antigravity` etc.), and `dapr/go-sdk`.
   - **NEVER Re-Implement `golden` Capabilities (NON-NEGOTIABLE — Requires Explicit User Approval)**: Any capability already provided by `golden` MUST be used directly and MUST NEVER be re-implemented, duplicated, or manually intercepted/disabled without explicit prior approval from the user. This includes:
     - HCL block registration, `gohcl` struct decoding, and unknown attribute/block rejection (`golden.RegisterBlock`, `golden.Decode`);
     - Native `variable` (precedence, `SOFA_VAR_*`, `.sofavars`, type conversion, `validation`) and `locals` evaluation;

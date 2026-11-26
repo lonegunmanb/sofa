@@ -9,11 +9,12 @@
 1. **直接复用 `github.com/lonegunmanb/golden`**：
    - 目录内所有 `*.sofa.hcl` 共享配置作用域，无顶层 `workflow {}` 包裹块。
    - 块注册、解码、`variable` / `locals` / `for_each` / `depends_on` / `precondition` 求值以及无环 DAG 构建全部委托给 `golden`（`AsHclBlocks`、`InitConfig`、`BaseBlock`、`PlanBlock`）。
-2. **Root Module 单例自动默认（0 / 1 / ≥2 规则）**：
-   - 不设显式 `defaults {}` 块；对 `sandbox` 与 `model_provider` 按 Root Module 中的声明数量推导：
-     - **0 个**：`sandbox` 在 Plan 期报错（所有 Session 必须在容器沙箱内运行）；`model_provider` 回退使用 `copilot-sdk/go` 默认提供方。
-     - **恰好 1 个**：自动作为全局默认绑定给未显式声明该字段的 `worker`、`dynamic_worker`（`content`）及未覆盖的子 `module`，并在 `InitConfig` 阶段自动补齐隐式 DAG 依赖边。
-     - **≥ 2 个**：存在歧义，未显式声明的消费块在 Plan 期报错。
+2. **Root Module 单例自动默认（0 / 1 / ≥2 正交规则）**：
+   - 不设显式 `defaults {}` 块；`sandbox`、`harness`、`model_provider` 三个运行维度**完全正交**，按 Root Module 中的声明数量各自独立推导：
+     - **`sandbox`**（容器环境）：`0` 个在 Plan 期报错（所有会话必须在沙箱容器内运行）；`1` 个自动绑定给省略 `sandbox` 的消费块；`≥ 2` 个要求显式指定。
+     - **`harness`**（Agent 驱动插件，基于 `hashicorp/go-plugin`）：`0` 个自动回退使用内置 `"copilot"` Harness；`1` 个自动绑定给省略 `harness` 的消费块（显式写 `harness = null` 可豁免继承、回退内置 `"copilot"`）；`≥ 2` 个要求显式指定或写 `null`。
+     - **`model_provider`**（模型推理端点与凭据）：`0` 个传空（由所选 `harness` 使用其自身默认提供方/认证）；`1` 个自动绑定给省略 `model_provider` 的消费块（**显式写 `model_provider = null` 可豁免继承**，便于同一配置中异构 `harness` 走各自原生认证）；`≥ 2` 个要求显式指定或写 `null`。
+     - 凡触发 `1` 个自动绑定的引用，均在 `InitConfig` 阶段自动注入遍历属性以补齐隐式 DAG 依赖边；未覆盖的子 `module` 自动继承 Root 单例。
    - `worker.based_source` **始终必填**（不参与默认推导，防止漏写静默断开前序工序链路）；`preserve.url` 在 Root 仅有 1 个 `source` 时可省略并自动关联。
 3. **结构化输出与非 Git 产物交接（对齐 `r42`）**：
    - 机械校验与结构化终止输出通过 `go_tool` / `external_tool` + `terminate_tool_id`（或 `tool_use { terminate = true }`）完成，结果暴露在 `worker.<name>.result`（HCL 内消费结构时配合 `jsondecode` 或保类型的 `jsondecodewithtype`）。
@@ -54,14 +55,14 @@ preserve "final_implementation" {
 }
 ```
 
-#### 2) `sandbox "<name>"`
+#### 2) `sandbox "<name>"` 与 `harness "<name>"`
 
 ```hcl
 sandbox "go_env" {
   runtime    = "podman" # "podman" | "docker" | "nerdctl" | "kirk"
   image      = "ghcr.io/lonegunmanb/sofa-go:1.27"
   entrypoint = null
-  network    = "none"
+  network    = "bridge" # 默认 "bridge"；可配置 "bridge" | "none" | "host"
 
   mount {
     source    = "/var/cache/sofa/gomod"
@@ -74,6 +75,22 @@ sandbox "go_env" {
     memory = "8g"
   }
 }
+
+# 对齐 tflint 插件声明机制，基于 hashicorp/go-plugin (gRPC) 接入任意语言 Agent Harness，与 model_provider 完全正交
+harness "antigravity" {
+  source      = "github.com/lonegunmanb/sofa-harness-antigravity" # 可选：与 version 成对出现（省略时走内置 copilot 或本地手动插件）
+  version     = "0.1.0"                                           # 精确语义化版本号，不带前缀 "v"
+  signature   = "auto"                                            # "auto"(默认) | "attestation" | "pgp" | "none"
+  signing_key = null                                              # signature = "pgp" 时必填
+
+  env_refs = {
+    GEMINI_API_KEY = "GEMINI_API_KEY"
+  }
+
+  options = {
+    location = "us-central1"
+  }
+}
 ```
 
 #### 3) `worker "<name>"`
@@ -83,10 +100,11 @@ sandbox "go_env" {
 ```hcl
 worker "implement" {
   based_source   = worker.tasks.work_branch
-  sandbox        = sandbox.go_env           # Root 单例时可省略
+  sandbox        = sandbox.go_env            # Root 单例时可省略
+  harness        = harness.antigravity       # Root 0个默认内置 copilot；1个时可省略；写 null 回退内置 copilot
   writable_paths = ["cmd/**", "internal/**", "go.mod", "go.sum"]
 
-  model_provider          = model_provider.openrouter # Root 单例时可省略
+  model_provider          = model_provider.openrouter # Root 单例时可省略；显式写 null 可豁免继承、走 harness 原生认证
   model                   = var.model
   profile                 = null
   reasoning_effort        = "high"
@@ -139,8 +157,9 @@ worker "implement" {
     require_clean_worktree = true
   }
 
-  # 独立容器 QC Session（默认继承所属 worker 的 model_provider / model / sandbox）
+  # 独立容器 QC Session（默认继承所属 worker 的 harness / model_provider / model / sandbox，可单独覆盖 harness 实现异构互审）
   qc {
+    harness          = null # 可选：覆盖为如 harness.antigravity 做跨模型/跨 Harness 独立质检
     model            = "claude-opus-4-6"
     reasoning_effort = "high"
     max_qc_rounds    = 3

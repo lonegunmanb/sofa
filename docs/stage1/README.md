@@ -33,7 +33,9 @@ sofa/
 │   ├── provider/                   # [003] model_provider "<name>" 与 RetryPolicy
 │   ├── mcp/                        # [003] mcp_server "<name>" 与确定性工具/资源 ID
 │   ├── sandbox/
-│   │   └── spec/                   # [003] sandbox "<name>" 块配置模型与校验
+│   │   └── spec/                   # [003, 004b] sandbox "<name>" 块配置模型与校验（默认 bridge 网络）
+│   ├── harness/
+│   │   └── spec/                   # [004b] harness "<name>" 插件声明块（对齐 tflint，正交于 model_provider）
 │   ├── tool/
 │   │   ├── gotool/                 # [004] go_tool 内联 Go 源码 AST 与类型签名分析
 │   │   └── spec/                   # [004] go_tool / external_tool 块、Constraint(JSON Schema) 与确定性 ID
@@ -109,12 +111,13 @@ sofa/
 | **002** | [002-source-and-preserve.md](./002-source-and-preserve.md) | `source "<name>"`、`preserve "<name>"`、`BranchRef` 约定、唯一 `source` 自动补全 | 001 |
 | **003** | [003-providers-sandbox-and-defaults.md](./003-providers-sandbox-and-defaults.md) | `model_provider`、`mcp_server`、`sandbox` 及 Root 单例（0/1/≥2）自动默认注入 | 001 |
 | **004** | [004-typed-tools.md](./004-typed-tools.md) | `go_tool`、`external_tool`、类型约束与 JSON Schema 转换、`postcondition`、确定性 `.id` | 001 |
-| **005** | [005-static-worker.md](./005-static-worker.md) | `worker "<name>"`（含 `for_each`、`artifact`、`import_artifact`、`tool_use`、`gatekeeper`、`qc`、`fallback` 及延迟表达式） | 002, 003, 004 |
+| **004b** | [004b-harness-and-sandbox-bridge.md](./004b-harness-and-sandbox-bridge.md) | `harness "<name>"` 插件块（对齐 `tflint`，正交于 `model_provider`）、`RootDefaults.Harnesses`、`sandbox.network` 默认 `"bridge"` | 003 |
+| **005** | [005-static-worker.md](./005-static-worker.md) | `worker "<name>"`（正交绑定 `sandbox`/`harness`/`model_provider`、`for_each`、`artifact`、`import_artifact`、`tool_use`、`gatekeeper`、`qc`、`fallback` 及延迟表达式） | 002, 003, 004, 004b |
 | **006** | [006-dynamic-worker-and-merge.md](./006-dynamic-worker-and-merge.md) | `dynamic_worker "<name>"`（含 `iterator`）与纯确定性 `merge "<name>"` | 005 |
-| **007** | [007-modules-sofaplan-and-cli.md](./007-modules-sofaplan-and-cli.md) | `sofa init`、`module` 递归规划（含 Root 单例继承）、`.sofaplan` ZIP 归档编解码、`sofa plan` / `sofa schema` CLI | 006 |
+| **007** | [007-modules-sofaplan-and-cli.md](./007-modules-sofaplan-and-cli.md) | `sofa init`（含 `tflint` 风格 Harness 插件验签与 `.sofa/plugins.lock.json` 跨平台哈希锁定）、`module` 递归规划、`.sofaplan` ZIP 归档编解码、`sofa plan` / `sofa schema` CLI | 006 |
 
-### 待优先执行的收口任务（Upstream Follow-Up Tasks — 已解锁！）
+### 已完成的上游跟进收口记录
 
 | 任务文档 | 状态与解锁提交 | 核心动作 |
 | :--- | :--- | :--- |
-| [adopt-golden-output.md](./adopt-golden-output.md) | **已解锁 ✅**（[golden#18](https://github.com/lonegunmanb/golden/issues/18) 已关闭，提交 `059cc8c`）— **在 `004` 前优先执行** | 升级 `golden@059cc8c`，删除 `internal/module/spec` 手造 `OutputBlock` 及 `RegisterBlock` 调用，全面切换至 `*golden.OutputBlock` |
+| [adopt-golden-output.md](./adopt-golden-output.md) | **已完成 ✅**（提交 `cad8e1f`，上游 `golden@059cc8c`） | 已升级 `golden` 并删除手造 `OutputBlock`，全面切换至 `*golden.OutputBlock` |

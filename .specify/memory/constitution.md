@@ -44,7 +44,7 @@ Before committing to, specifying, or accepting any feature slice or implementati
 
 - **Backend, DSL & Agent Runtime**: Go (`module github.com/lonegunmanb/sofa`), using:
   - `hashicorp/hcl/v2` and `github.com/lonegunmanb/golden` as the HCL-to-DAG planning and execution engine (with `lower_snake_case` block/attribute conventions aligned with `github.com/lonegunmanb/r42`). Contributors MUST delegate HCL block registration/decoding, `variable`/`locals`/`for_each`/`depends_on` evaluation, and DAG construction/traversal directly to `golden` (`AsHclBlocks`, `InitConfig`, `BaseBlock`, `PlanBlock`, `ApplyBlock`) rather than re-implementing custom HCL loaders or DAG engines.
-  - `github.com/github/copilot-sdk/go` (using its bundled Copilot CLI by default) as the in-container Session runtime for Work and QC agents, preserving `r42`-compatible `model_provider`, `mcp_server`, typed tools (`go_tool` / `external_tool`), skills, and retry semantics.
+  - `hashicorp/go-plugin` (gRPC with `AutoMTLS` and containerized `RunnerFunc`) as the pluggable multi-language Agent Harness boundary inside `sandbox` containers—shipping a bundled `copilot` harness (`github.com/github/copilot-sdk/go`) out of the box while supporting external Go/Python/Node harnesses (such as `google-antigravity`) declared and verified via `tflint`-style GitHub Release `source` + `version` + `checksums.txt` / attestations. `harness`, `model_provider`, and `sandbox` MUST remain orthogonal dimensions, preserving `r42`-compatible `mcp_server`, typed tools (`go_tool` / `external_tool`), skills, and retry semantics.
   - `dapr/go-sdk` for distributed Actor orchestration (`OperatorActor`, `NodeActor`, `MergeActor`, `ProcessRegistryActor`) without requiring Kubernetes.
 - **Frontend (Dashboard & Human Decision UI)**: Vue 3 + TypeScript + Vite (with supporting UI/state libraries justified in the relevant feature `plan.md`), consuming the same HTTP/JSON management API used by the CLI and external callers such as The Machine.
 - **Git & Branch Hygiene**: Workers MUST never mutate `source` branches directly; every worker execution MUST register its `work_branch` before creation from a pinned commit SHA, and Run completion or deletion MUST clean up registered intermediate branches while preserving `source` and `preserve`-matched branches.
@@ -73,4 +73,4 @@ Amendments to this Constitution require explicit user approval, an updated Sync 
 
 Runtime guidance for AI coding agents is maintained in `AGENTS.md` at the repository root and MUST stay consistent with this Constitution.
 
-**Version**: 1.3.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-25
+**Version**: 1.4.0 | **Ratified**: 2026-11-25 | **Last Amended**: 2026-11-26

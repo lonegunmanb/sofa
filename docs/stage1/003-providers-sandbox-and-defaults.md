@@ -64,6 +64,8 @@
 
 ### 3.3 `sandbox "<name>"`（`sofa` 新增块）
 
+> **演进说明（分片 `004b` 更新）**：分片 `003` 初始落地时 `network` 默认值为 `"none"`；在分片 [004b-harness-and-sandbox-bridge.md](./004b-harness-and-sandbox-bridge.md) 中，`sandbox.network` 的默认值已统一调整为 **`"bridge"`**（仍可显式配置为 `"bridge"` | `"none"` | `"host"`），同时 `RootDefaults` 扩展增加了 `Harnesses`。
+
 ```hcl
 sandbox "go_env" {
   runtime    = "podman"

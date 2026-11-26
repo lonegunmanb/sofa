@@ -50,19 +50,31 @@ flowchart TB
 
 ---
 
-## 4. 宿主机工作进程、容器沙箱与 Session 工具门禁协议
+## 4. 宿主机工作进程、容器沙箱、`go-plugin` Harness 接入与工具门禁协议
 
 ### 4.1 物理与凭据隔离边界
-- **宿主机工作进程（`sofa-worker`）**：可信运行时，持有 Git 远端推送凭据、Artifact `BlobStore` 凭据与 Dapr 通信入口；负责从 `BlobStore` 拉取 `.sofaplan` 资源只读挂载为容器的 `${path.module}`，管理项目代码卷以及启动/销毁 Work、Gatekeeper、QC 容器。
+- **宿主机工作进程（`sofa-worker`）**：可信运行时，持有 Git 远端推送凭据、Artifact `BlobStore` 凭据与 Dapr 通信入口；负责从 `BlobStore` 拉取 `.sofaplan` 资源只读挂载为容器的 `${path.module}`，按锁定哈希准备并只读挂载 `/.sofa/harness/` 插件目录，管理项目代码卷以及启动/销毁 Work、Gatekeeper、QC 容器（`sandbox.network` 默认 `"bridge"`，可按需配置 `"bridge"` | `"none"` | `"host"`）。
 - **容器内部**：不可信沙箱边界，按 `writable_paths` 限制项目卷读写范围，其他目录（`/tmp`、`$HOME` 等）容器私有隔离；**绝不持有 Git 推送密钥或 Dapr 访问权，绝不允许调用任何宿主机命令**。
 
-### 4.2 Session 级强类型工具与双层门禁（复刻 `r42` 机制）
-- `sofa` 提供的会话协议工具（`sofa_checkpoint`、`sofa_request_decision`、`sofa_pause_for_human`、Artifact 读取工具、QC 问题账本与裁决工具）统一注册为 `copilot-sdk/go` 的内存 `sdk.Tool` Handler，**仅能由 LLM 对话轮次发起 `tool_call` 触发，容器内任何子进程或 `bash` 脚本均无入口调用**。
-- 通过 `sdk.SessionHooks.OnPreToolUse`（拦截内置/MCP 工具）+ `sdk.Tool` Handler 包装（拦截自定义/协议工具）实施四条硬约束：
+### 4.2 基于 `hashicorp/go-plugin`（gRPC）的多语言 Agent Harness 架构与 `tflint` 风格安装
+- **插件通信与密码学防越权（`go-plugin` + `AutoMTLS` + `RunnerFunc`）**：
+  - `sofa` 不绑定单一语言 Agent SDK，而是基于 `github.com/hashicorp/go-plugin`（`ProtocolGRPC`）接入任意语言的 `AgentHarness` 插件：通过自定义 `ClientConfig.RunnerFunc` 在目标 `sandbox` 容器内启动插件进程（插件作为 gRPC Server，宿主机 `sofa-worker` 作为 gRPC Client），走宿主机与容器共享私有目录的 **Unix Domain Socket**（`/.sofa/plugin/harness.sock`）。
+  - 强制开启 **`AutoMTLS: true`**：客户端私钥仅驻留于宿主机 `sofa-worker` 内存，容器内插件启动完成握手后立即清理 `PLUGIN_*` 环境变量；宿主机无任何暴露给容器的监听端口，容器内 `bash` 派生的任何恶意子进程无宿主机客户端私钥，从 TLS 层彻底阻断伪造调用。
+- **极简原生 gRPC 双向流契约（免除 Python/非 Go 插件的 `GRPCBroker` 负担）**：
+  - `AgentHarness` 服务仅定义 `OpenSession`、`RunTurn(stream HostTurnFrame) returns (stream PluginTurnFrame)`、`CloseSession` 三个方法（配合 `go-plugin` 标准 `Health` / `GRPCController` / `GRPCStdio`）：
+  - 单轮对话复用同一条原生双向流推送 `ThoughtDelta`/`TextDelta`，并在内置工具执行前向宿主机发起 `PreToolUseCheck` 询问，在模型调用 `sofa_*` 协议工具或 `go_tool` 时向宿主机发起 `InvokeHostTool` 请求。
+- **对齐 `tflint` 的三种插件来源与跨平台锁定机制**：
+  1. **内置默认插件（Bundled `"copilot"`）**：基于 `copilot-sdk/go` 编译进二进制（`--act-as-bundled-harness copilot`），Root 未声明 `harness` 时默认启用，零下载开箱即用。
+  2. **GitHub Releases 自动下载验签（`source` + `version`）**：发布包遵循 `v{version}` Tag 与 `sofa-harness-{name}_{os}_{arch}.zip` + `checksums.txt` 规范，支持 `signature = "auto" | "attestation" | "pgp" | "none"`（优先验 GitHub OIDC Artifact Attestations，回退 PGP `signing_key`）及 `GITHUB_TOKEN` / `GITHUB_TOKEN_<normalized_host>`。`sofa init` 验签后将全平台 SHA-256 锁定写入 `.sofa/plugins.lock.json` 随 `.sofaplan` 分发；`sofa-worker` 按目标容器 `linux/<arch>` 缓存并核对锁定哈希后将整个插件目录（含入口 `sofa-harness-{name}` 及 Python 等自包含运行时）只读挂载至容器 `/.sofa/harness/`。
+  3. **本地手动安装（省略 `source` 与 `version`）**：按 `--plugin-dir` > `SOFA_PLUGIN_DIR` > `./.sofa/plugins` > `~/.sofa/plugins` 查找本地插件。
+
+### 4.3 Session 级强类型工具与宿主机四道门禁（100% 收敛在 Go `sofa-worker`）
+- `sofa` 提供的会话协议工具（`sofa_checkpoint`、`sofa_request_decision`、`sofa_pause_for_human`、Artifact 读取工具、QC 问题账本与裁决工具）以及 `go_tool` 的真实 Handler **全部运行在宿主机 `sofa-worker` 进程内**，仅向容器内 `AgentHarness` 下发工具名与 JSON Schema，**仅能由 LLM 对话轮次在激活的 `RunTurn` 流上发起调用，容器内任何子进程或 `bash` 脚本均无入口调用**。
+- 宿主机 `sofa-worker` 在处理 `PreToolUseCheck`（拦截内置/MCP 工具）与 `InvokeHostTool`（拦截协议/自定义工具）时统一实施四条硬约束：
   1. **每次工具调用前查插话**：每次工具执行前及发送新消息前核对 `NodeActor` 是否有新人工日记插话，有则优先注入上下文；若带“回答后等待确认”标记，锁定业务修改工具，要求 Agent 回答后调用 `sofa_pause_for_human` 进入 `WAITING_HUMAN`。
   2. **每满 N 轮强制检查点（`checkpointPending`）**：连续完成 `checkpoint_every_rounds` 轮工具调用后锁死其他工具，拒绝一切非检查点调用直至 `sofa_checkpoint` 提交结构化日记并完成远端检查点落盘。
   3. **交接锁死当前回复（`roundComplete` 边界）**：一旦提交审查、`sofa_request_decision` 或暂停工具被 `Accepted`，立即拒绝本轮回复中的所有后续工具调用（并用 `activeToolCalls` 引用计数确保无并发在途工具），强制模型结束当前回复；若模型未按协议调工具就擅自结束回复，外层 `Runner` 自动发协议修复提示重试（上限 `max_protocol_attempts`）。
-  4. **容器内 `gatekeeper` + 冻结式独立 `QC` 容器**：Work 回复干净结束后，工作区冻结；先在容器内执行 `gatekeeper` 命令验真实退出码与干净工作树，通过后再挂载同一只读冻结代码卷启动独立 `QC` 容器；任一未通过均带结构化问题打回 Work Session（超出轮数上限则按显式 `fallback` 退回前序节点或报错）。
+  4. **容器内 `gatekeeper` + 冻结式独立 `QC` 容器**：Work 回复干净结束后，工作区冻结；先在容器内执行 `gatekeeper` 命令验真实退出码与干净工作树，通过后再挂载同一只读冻结代码卷启动独立 `QC` 容器（可复用或覆盖 `harness` 实现异构模型互审）；任一未通过均带结构化问题打回 Work Session（超出轮数上限则按显式 `fallback` 退回前序节点或报错）。
 
 ---
 

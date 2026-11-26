@@ -14,7 +14,7 @@
 
 - `internal/worker/spec/dynamic.go`：`DynamicWorkerBlock`、`DynamicWorkerTemplate`
 - `internal/merge/spec/schema.go`：`MergeBlock`、`MergeConfig`
-- 修改 `internal/planner/config.go`：注册 `DynamicWorkerBlock` 与 `MergeBlock`，并为省略 `sandbox`/`model_provider` 的 `dynamic_worker`（`content`）和带 `gatekeeper` 的 `merge` 接入 Root 单例默认检查
+- 修改 `internal/planner/config.go`：注册 `DynamicWorkerBlock` 与 `MergeBlock`，并为省略 `sandbox`/`harness`/`model_provider` 的 `dynamic_worker`（`content`）和带 `gatekeeper` 的 `merge`（`sandbox`）接入正交 Root 单例默认检查
 
 ---
 
@@ -54,7 +54,7 @@ dynamic_worker "verify_notifications" {
 2. **`iterator = check` 是裸标识符，严禁调用 `attr.Expr.Value(ctx)`！**
    - 在 HCL 中，`iterator = check` 的右侧 `check` 不是一个已定义的变量，而是一个待声明的迭代变量名！如果你调用 `attr.Expr.Value(ctx)`，HCL 会立刻报错 `There is no variable named "check"`！
    - **正确做法**：
-     - 第一步：用 `hcl.AbsTraversalForExpr(iteratorAttr.Expr)` 提取遍历路径，要求 `len(traversal) == 1` 且取得 `traversal.RootName()` 作为 `iteratorName`（校验其为合法标识符，且不能与保留根名 `var`、`local`、`source`、`preserve`、`sandbox`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`worker`、`dynamic_worker`、`merge`、`module`、`path`、`import_artifact` 冲突！）；
+     - 第一步：用 `hcl.AbsTraversalForExpr(iteratorAttr.Expr)` 提取遍历路径，要求 `len(traversal) == 1` 且取得 `traversal.RootName()` 作为 `iteratorName`（校验其为合法标识符，且不能与保留根名 `var`、`local`、`source`、`preserve`、`sandbox`、`harness`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`worker`、`dynamic_worker`、`merge`、`module`、`path`、`import_artifact` 冲突！）；
      - 第二步（⚠️ 同样关键！）：`golden.InitConfig` 里的 `dagWalker` 只对已注册块根名建边，不会因为 `check` 报错，但校验 `content` 内部表达式时，你必须先构造包含 `iteratorName` 的子 `hcl.EvalContext`！
 
 ### 3.2 `for_each` 与 `content` 的静态类型检查流程
@@ -70,7 +70,7 @@ dynamic_worker "verify_notifications" {
      - 其他类型（如 `string`、`number`、`list` 非 set）→ 直接在 Plan 期报错：`dynamic_worker for_each must be a map, object, or set of strings`！
 3. **`content { ... }` 模板静态预检**：
    - 构造模拟单实例的子 `EvalContext`：注入 `ctx.Variables[iteratorName] = cty.ObjectVal({"key": cty.UnknownVal(cty.String), "value": cty.UnknownVal(valType)})`；
-   - 将 `content` 块包装为虚拟 `WorkerBlock`（应用与 `005` 完全相同的 Root 单例 `sandbox`/`model_provider` 注入、局部 `artifact(...)` 函数、`import_artifact` 变量、嵌套 `gatekeeper`/`qc`/`fallback` 校验），确保 `content` 内部的任何拼写错误（例如当 `valType = object({ cond = string })` 时误写 `${check.value.typo}`）在 **Plan 期 100% 捕获**！
+   - 将 `content` 块包装为虚拟 `WorkerBlock`（应用与 `005` 完全相同的 Root 单例 `sandbox`/`harness`/`model_provider` 正交注入、局部 `artifact(...)` 函数、`import_artifact` 变量、嵌套 `gatekeeper`/`qc`/`fallback` 校验），确保 `content` 内部的任何拼写错误（例如当 `valType = object({ cond = string })` 时误写 `${check.value.typo}`）在 **Plan 期 100% 捕获**！
    - 保存 `ForEachExpr`、`IteratorName` 与 `ContentTemplate`（规范化延迟表达式）。
 
 ### 3.3 `DynamicWorkerBlock.Value()` 导出结构
