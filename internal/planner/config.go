@@ -20,6 +20,7 @@ import (
 	sourcespec "github.com/lonegunmanb/sofa/internal/source"
 	specpkg "github.com/lonegunmanb/sofa/internal/spec"
 	toolspec "github.com/lonegunmanb/sofa/internal/tool/spec"
+	workerspec "github.com/lonegunmanb/sofa/internal/worker/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -55,6 +56,7 @@ func RegisterBlocks() {
 		golden.RegisterBlock(&harnessspec.HarnessBlock{})
 		golden.RegisterBlock(&toolspec.GoToolBlock{})
 		golden.RegisterBlock(&toolspec.ExternalToolBlock{})
+		golden.RegisterBlock(&workerspec.WorkerBlock{})
 	})
 }
 
@@ -88,6 +90,9 @@ func NewSofaConfig(args ConfigArgs) *SofaConfig {
 func (c *SofaConfig) Init(blocks []*golden.HclBlock) error {
 	preparedBlocks, err := applyRootDefaults(blocks)
 	if err != nil {
+		return err
+	}
+	if err := validateWorkerFallbacks(preparedBlocks); err != nil {
 		return err
 	}
 	if err := c.scanVariableDeclarations(preparedBlocks); err != nil {
@@ -159,6 +164,12 @@ func (c *SofaConfig) EvalContext() *hcl.EvalContext {
 			values[name] = value
 		}
 		ctx.Variables["var"] = cty.ObjectVal(values)
+	}
+	if workerValue, ok := ctx.Variables["worker"]; ok &&
+		!workerValue.IsNull() &&
+		workerValue.Type().IsObjectType() &&
+		workerValue.Type().HasAttribute("") {
+		ctx.Variables["worker"] = workerValue.GetAttr("")
 	}
 
 	ctx.Variables["path"] = cty.ObjectVal(map[string]cty.Value{

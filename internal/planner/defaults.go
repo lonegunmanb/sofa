@@ -93,6 +93,7 @@ func (d RootDefaults) ResolveDefaultModelProvider(consumerAddr string) (*string,
 
 func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 	defaults := InspectRootDefaults(blocks)
+	result := append([]*golden.HclBlock(nil), blocks...)
 	type omittedPreserve struct {
 		name       string
 		blockIndex int
@@ -113,35 +114,80 @@ func applyRootDefaults(blocks []*golden.HclBlock) ([]*golden.HclBlock, error) {
 			}
 		}
 	}
-	if len(preserves) == 0 {
-		return blocks, nil
-	}
-
-	switch len(defaults.Sources) {
-	case 0:
-		return nil, fmt.Errorf(
-			"preserve %q omits url, but no source block is declared in root module",
-			preserves[0].name,
-		)
-	case 1:
-	default:
-		return nil, fmt.Errorf(
-			"preserve %q omits url, but multiple source blocks are declared in root module (%s); set url explicitly",
-			preserves[0].name,
-			strings.Join(defaults.Sources, ", "),
-		)
-	}
-
-	result := append([]*golden.HclBlock(nil), blocks...)
-	sourceName := defaults.Sources[0]
-	for _, preserve := range preserves {
-		original := blocks[preserve.blockIndex]
-		traversal := hcl.Traversal{
-			hcl.TraverseRoot{Name: "source", SrcRange: original.TypeRange},
-			hcl.TraverseAttr{Name: sourceName, SrcRange: original.TypeRange},
-			hcl.TraverseAttr{Name: "url", SrcRange: original.TypeRange},
+	if len(preserves) > 0 {
+		switch len(defaults.Sources) {
+		case 0:
+			return nil, fmt.Errorf(
+				"preserve %q omits url, but no source block is declared in root module",
+				preserves[0].name,
+			)
+		case 1:
+		default:
+			return nil, fmt.Errorf(
+				"preserve %q omits url, but multiple source blocks are declared in root module (%s); set url explicitly",
+				preserves[0].name,
+				strings.Join(defaults.Sources, ", "),
+			)
 		}
-		result[preserve.blockIndex] = cloneBlockWithTraversalAttribute(original, "url", traversal)
+		sourceName := defaults.Sources[0]
+		for _, preserve := range preserves {
+			original := blocks[preserve.blockIndex]
+			traversal := hcl.Traversal{
+				hcl.TraverseRoot{Name: "source", SrcRange: original.TypeRange},
+				hcl.TraverseAttr{Name: sourceName, SrcRange: original.TypeRange},
+				hcl.TraverseAttr{Name: "url", SrcRange: original.TypeRange},
+			}
+			result[preserve.blockIndex] = cloneBlockWithTraversalAttribute(original, "url", traversal)
+		}
+	}
+
+	for index, block := range result {
+		if block == nil || block.Type != "worker" || len(block.Labels) != 2 {
+			continue
+		}
+		worker, err := injectWorkerRootDefaults(block, defaults)
+		if err != nil {
+			return nil, err
+		}
+		result[index] = worker
+	}
+	return result, nil
+}
+
+func injectWorkerRootDefaults(block *golden.HclBlock, defaults RootDefaults) (*golden.HclBlock, error) {
+	address := block.Labels[1]
+	result := block
+	if _, explicit := result.Body.Attributes["sandbox"]; !explicit {
+		name, err := defaults.ResolveDefaultSandbox("worker." + address)
+		if err != nil {
+			return nil, err
+		}
+		result = cloneBlockWithTraversalAttribute(result, "sandbox", hcl.Traversal{
+			hcl.TraverseRoot{Name: "sandbox", SrcRange: result.TypeRange},
+			hcl.TraverseAttr{Name: name, SrcRange: result.TypeRange},
+		})
+	}
+	if _, explicit := result.Body.Attributes["harness"]; !explicit {
+		name, err := defaults.ResolveDefaultHarness("worker." + address)
+		if err != nil {
+			return nil, err
+		}
+		result = cloneBlockWithTraversalAttribute(result, "harness", hcl.Traversal{
+			hcl.TraverseRoot{Name: "harness", SrcRange: result.TypeRange},
+			hcl.TraverseAttr{Name: name, SrcRange: result.TypeRange},
+		})
+	}
+	if _, explicit := result.Body.Attributes["model_provider"]; !explicit {
+		name, err := defaults.ResolveDefaultModelProvider("worker." + address)
+		if err != nil {
+			return nil, err
+		}
+		if name != nil {
+			result = cloneBlockWithTraversalAttribute(result, "model_provider", hcl.Traversal{
+				hcl.TraverseRoot{Name: "model_provider", SrcRange: result.TypeRange},
+				hcl.TraverseAttr{Name: *name, SrcRange: result.TypeRange},
+			})
+		}
 	}
 	return result, nil
 }
