@@ -34,7 +34,52 @@ output "network" {
 	cfg := newTestPlanner(t, dir, nil)
 	initPlanner(t, cfg, dir)
 	require.NoError(t, cfg.RunPlan())
-	require.Equal(t, "none", cfg.Outputs()[0].Value.AsString())
+	require.Equal(t, "bridge", cfg.Outputs()[0].Value.AsString())
+
+	var block *sandboxspec.SandboxBlock
+	for _, vertex := range cfg.GetVertices() {
+		if candidate, ok := vertex.(*sandboxspec.SandboxBlock); ok {
+			block = candidate
+		}
+	}
+	require.NotNil(t, block)
+	require.Equal(t, "bridge", block.SandboxConfig().Network)
+}
+
+func TestSandboxNetworkNullDefaultsToBridgeAndExplicitNonePreserved(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+sandbox "null_net" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+  network = null
+}
+
+sandbox "isolated" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+  network = "none"
+}
+
+output "null_net" {
+  value = sandbox.null_net.network
+}
+
+output "isolated" {
+  value = sandbox.isolated.network
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+
+	outputs := make(map[string]string, len(cfg.Outputs()))
+	for _, out := range cfg.Outputs() {
+		outputs[out.Name] = out.Value.AsString()
+	}
+	require.Equal(t, "bridge", outputs["null_net"])
+	require.Equal(t, "none", outputs["isolated"])
 }
 
 func TestSandboxRejectsUnsafeConfiguration(t *testing.T) {

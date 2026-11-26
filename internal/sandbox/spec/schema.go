@@ -138,7 +138,7 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 			return fmt.Errorf("sandbox entrypoint must not be an empty list")
 		}
 	}
-	network := "none"
+	network := "bridge"
 	if b.Network != nil {
 		network = *b.Network
 	}
@@ -192,7 +192,7 @@ func (b *SandboxBlock) SandboxConfig() SandboxConfig {
 	if b.plannedConfig != nil {
 		return cloneSandboxConfig(*b.plannedConfig)
 	}
-	network := "none"
+	network := "bridge"
 	if b.Network != nil {
 		network = *b.Network
 	}

@@ -109,3 +109,45 @@ output "tool" {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 }
+
+const coldStartHarnessChildEnv = "SOFA_COLD_START_HARNESS_CHILD"
+
+func TestColdStartLoadHarnessBeforeNewSofaConfig(t *testing.T) {
+	if os.Getenv(coldStartHarnessChildEnv) == "1" {
+		dir := os.Getenv("SOFA_COLD_START_DIR")
+		loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
+		require.NoError(t, err)
+		require.False(t, diags.HasErrors(), diags.Error())
+		require.Len(t, loaded.Blocks, 2)
+
+		cfg := NewSofaConfig(ConfigArgs{
+			Context:   context.Background(),
+			Directory: dir,
+		})
+		require.NoError(t, cfg.Init(loaded.Blocks))
+		require.NoError(t, cfg.RunPlan())
+		require.Len(t, cfg.Outputs(), 1)
+		require.Equal(t, "github.com/lonegunmanb/sofa-harness-antigravity", cfg.Outputs()[0].Value.AsString())
+		return
+	}
+
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+harness "antigravity" {
+  source  = "github.com/lonegunmanb/sofa-harness-antigravity"
+  version = "0.1.0"
+}
+
+output "harness_source" {
+  value = harness.antigravity.source
+}
+`)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestColdStartLoadHarnessBeforeNewSofaConfig$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		coldStartHarnessChildEnv+"=1",
+		"SOFA_COLD_START_DIR="+dir,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}

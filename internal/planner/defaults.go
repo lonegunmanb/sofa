@@ -21,6 +21,7 @@ const (
 type RootDefaults struct {
 	Sources        []string
 	Sandboxes      []string
+	Harnesses      []string
 	ModelProviders []string
 }
 
@@ -35,6 +36,8 @@ func InspectRootDefaults(blocks []*golden.HclBlock) RootDefaults {
 			defaults.Sources = append(defaults.Sources, block.Labels[1])
 		case "sandbox":
 			defaults.Sandboxes = append(defaults.Sandboxes, block.Labels[1])
+		case "harness":
+			defaults.Harnesses = append(defaults.Harnesses, block.Labels[1])
 		case "model_provider":
 			defaults.ModelProviders = append(defaults.ModelProviders, block.Labels[1])
 		}
@@ -53,6 +56,21 @@ func (d RootDefaults) ResolveDefaultSandbox(consumerAddr string) (string, error)
 			"%s encounters multiple sandbox blocks in the root module (%s); set sandbox explicitly",
 			consumerAddr,
 			strings.Join(d.Sandboxes, ", "),
+		)
+	}
+}
+
+func (d RootDefaults) ResolveDefaultHarness(consumerAddr string) (string, error) {
+	switch len(d.Harnesses) {
+	case 0:
+		return "", fmt.Errorf("%s requires a harness, but the root module declares no harness block", consumerAddr)
+	case 1:
+		return d.Harnesses[0], nil
+	default:
+		return "", fmt.Errorf(
+			"%s encounters multiple harness blocks in the root module (%s); set harness explicitly",
+			consumerAddr,
+			strings.Join(d.Harnesses, ", "),
 		)
 	}
 }

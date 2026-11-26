@@ -20,6 +20,12 @@ func TestSandboxConfigValidate(t *testing.T) {
 	}
 	require.NoError(t, valid.Validate())
 
+	for _, network := range []string{"bridge", "none", "host"} {
+		cfg := cloneSandboxConfig(valid)
+		cfg.Network = network
+		require.NoError(t, cfg.Validate())
+	}
+
 	tests := []struct {
 		name   string
 		mutate func(*SandboxConfig)
@@ -51,4 +57,12 @@ func TestSandboxConfigValidate(t *testing.T) {
 			require.ErrorContains(t, cfg.Validate(), tt.want)
 		})
 	}
+}
+
+func TestSandboxBlockDefaultsNetworkToBridge(t *testing.T) {
+	block := &SandboxBlock{
+		Runtime: "podman",
+		Image:   "ghcr.io/example/go:1.27",
+	}
+	require.Equal(t, "bridge", block.SandboxConfig().Network)
 }
