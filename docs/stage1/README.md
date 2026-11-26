@@ -113,8 +113,8 @@ sofa/
 | **006** | [006-dynamic-worker-and-merge.md](./006-dynamic-worker-and-merge.md) | `dynamic_worker "<name>"`（含 `iterator`）与纯确定性 `merge "<name>"` | 005 |
 | **007** | [007-modules-sofaplan-and-cli.md](./007-modules-sofaplan-and-cli.md) | `sofa init`、`module` 递归规划（含 Root 单例继承）、`.sofaplan` ZIP 归档编解码、`sofa plan` / `sofa schema` CLI | 006 |
 
-### 待上游解锁的跟进收口任务（Upstream Follow-Up Tasks）
+### 待优先执行的收口任务（Upstream Follow-Up Tasks — 已解锁！）
 
-| 任务文档 | 解锁条件 | 核心动作 |
+| 任务文档 | 状态与解锁提交 | 核心动作 |
 | :--- | :--- | :--- |
-| [adopt-golden-output.md](./adopt-golden-output.md) | 上游 [golden#18](https://github.com/lonegunmanb/golden/issues/18) 解决并合入 | 升级 `golden`，删除 `internal/module/spec/output.go` 手造 `OutputBlock` 及 `RegisterBlock` 调用，全面切换至 `golden` 原生内置 `output` 块 |
+| [adopt-golden-output.md](./adopt-golden-output.md) | **已解锁 ✅**（[golden#18](https://github.com/lonegunmanb/golden/issues/18) 已关闭，提交 `059cc8c`）— **在 `004` 前优先执行** | 升级 `golden@059cc8c`，删除 `internal/module/spec` 手造 `OutputBlock` 及 `RegisterBlock` 调用，全面切换至 `*golden.OutputBlock` |
