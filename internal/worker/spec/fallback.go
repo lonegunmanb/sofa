@@ -206,7 +206,13 @@ func decodeFallbackArtifacts(
 func matchesDeclaredArtifact(elem cty.Value, art Artifact) bool {
 	if elem.Type().HasAttribute("path") {
 		p := elem.GetAttr("path")
-		if !p.IsKnown() || p.IsNull() || !p.Type().Equals(cty.String) || p.AsString() != art.Path {
+		if !p.IsKnown() || p.IsNull() || !p.Type().Equals(cty.String) || p.AsString() != art.ContainerPath() {
+			return false
+		}
+	}
+	if elem.Type().HasAttribute("rel_path") {
+		rp := elem.GetAttr("rel_path")
+		if !rp.IsKnown() || rp.IsNull() || !rp.Type().Equals(cty.String) || rp.AsString() != art.Path {
 			return false
 		}
 	}

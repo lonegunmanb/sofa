@@ -141,7 +141,7 @@ worker "implement" {
 
   artifact "test_report" {
     type        = "file"
-    path        = "reports/test-summary.json" # 挂载于 /.sofa/artifacts/reports/test-summary.json
+    path        = "reports/test-summary.json" # 挂载于 /.sofa/artifacts/reports/test-summary.json（${artifact("test_report").path} 返回该容器内绝对路径，.rel_path 返回相对路径）
     description = "测试摘要"
     required    = true
     non_empty   = true

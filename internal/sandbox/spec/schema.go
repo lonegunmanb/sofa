@@ -27,12 +27,11 @@ type ResourcesSpec struct {
 }
 
 type SandboxConfig struct {
-	Runtime    string
-	Image      string
-	Entrypoint []string
-	Network    string
-	Mounts     []MountSpec
-	Resources  *ResourcesSpec
+	Runtime   string
+	Image     string
+	Network   string
+	Mounts    []MountSpec
+	Resources *ResourcesSpec
 }
 
 func (c SandboxConfig) Validate() error {
@@ -46,9 +45,6 @@ func (c SandboxConfig) Validate() error {
 	}
 	if strings.IndexFunc(c.Image, unicode.IsSpace) >= 0 {
 		return fmt.Errorf("sandbox image must not contain whitespace")
-	}
-	if len(c.Entrypoint) > 0 && strings.TrimSpace(c.Entrypoint[0]) == "" {
-		return fmt.Errorf("sandbox entrypoint first element must not be empty")
 	}
 	switch c.Network {
 	case "none", "bridge", "host":
@@ -108,7 +104,6 @@ type SandboxBlock struct {
 	*golden.BaseBlock
 	Runtime        string           `hcl:"runtime"`
 	Image          string           `hcl:"image"`
-	Entrypoint     []string         `hcl:"entrypoint,optional"`
 	Network        *string          `hcl:"network,optional"`
 	MountBlocks    []MountBlock     `hcl:"mount,block"`
 	ResourceBlocks []ResourcesBlock `hcl:"resources,block"`
@@ -124,19 +119,6 @@ func (b *SandboxBlock) CanExecutePrePlan() bool { return false }
 func (b *SandboxBlock) ExecuteDuringPlan() error {
 	if len(b.ResourceBlocks) > 1 {
 		return fmt.Errorf("sandbox must have at most one resources block")
-	}
-	if entrypointAttribute, entrypointSet := b.HclBlock().Body.Attributes["entrypoint"]; entrypointSet {
-		entrypointValue, diags := entrypointAttribute.Expr.Value(b.EvalContext())
-		if diags.HasErrors() {
-			return diags
-		}
-		entrypointValue, _ = entrypointValue.UnmarkDeep()
-		if !entrypointValue.IsKnown() {
-			return fmt.Errorf("sandbox entrypoint must be known during plan")
-		}
-		if !entrypointValue.IsNull() && entrypointValue.LengthInt() == 0 {
-			return fmt.Errorf("sandbox entrypoint must not be an empty list")
-		}
 	}
 	network := "bridge"
 	if b.Network != nil {
@@ -158,12 +140,11 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 		}
 	}
 	config := SandboxConfig{
-		Runtime:    b.Runtime,
-		Image:      b.Image,
-		Entrypoint: append([]string{}, b.Entrypoint...),
-		Network:    network,
-		Mounts:     mounts,
-		Resources:  resources,
+		Runtime:   b.Runtime,
+		Image:     b.Image,
+		Network:   network,
+		Mounts:    mounts,
+		Resources: resources,
 	}
 	if err := config.Validate(); err != nil {
 		return err
@@ -219,14 +200,13 @@ func (b *SandboxBlock) SandboxConfig() SandboxConfig {
 		resources = &ResourcesSpec{CPUs: b.ResourceBlocks[0].CPUs, Memory: b.ResourceBlocks[0].Memory}
 	}
 	return SandboxConfig{
-		Runtime: b.Runtime, Image: b.Image, Entrypoint: append([]string{}, b.Entrypoint...),
+		Runtime: b.Runtime, Image: b.Image,
 		Network: network, Mounts: mounts, Resources: resources,
 	}
 }
 
 func cloneSandboxConfig(config SandboxConfig) SandboxConfig {
 	result := config
-	result.Entrypoint = append([]string{}, config.Entrypoint...)
 	result.Mounts = append([]MountSpec{}, config.Mounts...)
 	if config.Resources != nil {
 		resources := *config.Resources

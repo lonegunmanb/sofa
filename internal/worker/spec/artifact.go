@@ -11,6 +11,11 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+const (
+	ContainerArtifactsRoot = "/.sofa/artifacts"
+	ContainerImportsRoot   = "/.sofa/imports"
+)
+
 var (
 	artifactAllowedAttrs = map[string]struct{}{
 		"type": {}, "path": {}, "description": {}, "required": {}, "non_empty": {},
@@ -26,6 +31,7 @@ var artifactValueType = cty.Object(map[string]cty.Type{
 	"kind":        cty.String,
 	"type":        cty.String,
 	"path":        cty.String,
+	"rel_path":    cty.String,
 	"description": cty.String,
 	"required":    cty.Bool,
 	"non_empty":   cty.Bool,
@@ -40,11 +46,19 @@ type Artifact struct {
 	NonEmpty    bool
 }
 
+func (a Artifact) ContainerPath() string {
+	return path.Join(ContainerArtifactsRoot, a.Path)
+}
+
 type ImportArtifact struct {
 	Name    string
 	Desc    string
 	Path    string
 	Sources cty.Value
+}
+
+func (i ImportArtifact) ContainerPath() string {
+	return path.Join(ContainerImportsRoot, effectiveImportRelPath(i))
 }
 
 func artifactValue(artifact Artifact) cty.Value {
@@ -53,7 +67,8 @@ func artifactValue(artifact Artifact) cty.Value {
 		"name":        cty.StringVal(artifact.Name),
 		"kind":        cty.StringVal("artifact"),
 		"type":        cty.StringVal(artifact.Type),
-		"path":        cty.StringVal(artifact.Path),
+		"path":        cty.StringVal(artifact.ContainerPath()),
+		"rel_path":    cty.StringVal(artifact.Path),
 		"description": cty.StringVal(artifact.Description),
 		"required":    cty.BoolVal(artifact.Required),
 		"non_empty":   cty.BoolVal(artifact.NonEmpty),
@@ -99,11 +114,16 @@ func validateWorkspaceRelativePath(value, label string, allowDot bool) error {
 	return nil
 }
 
-func effectiveImportPath(imported ImportArtifact) string {
+// EffectiveImportRelPath returns the cleaned container-relative sub-path for an ImportArtifact.
+func EffectiveImportRelPath(imported ImportArtifact) string {
+	return effectiveImportRelPath(imported)
+}
+
+func effectiveImportRelPath(imported ImportArtifact) string {
 	if imported.Path != "" {
 		return path.Clean(imported.Path)
 	}
-	return path.Clean(".sofa/imports/" + imported.Name)
+	return imported.Name
 }
 
 func decodeArtifact(block *golden.HclBlock, ctx *hcl.EvalContext) (Artifact, error) {

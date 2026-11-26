@@ -155,9 +155,15 @@ worker "plan_step" {
   based_source      = source.project.branch
   model             = "gpt-5"
   system_prompt     = "Plan changes."
-  prompt            = "Use ${var.api_secret}"
+  prompt            = "Use ${var.api_secret} and write ${artifact("plan_doc").path}"
   skill_directories = ["${path.module}/skills"]
   mcp_tool_ids      = [mcp_server.docs_http.tool_ids["search"], mcp_server.docs_stdio.tool_ids["lint"]]
+
+  artifact "plan_doc" {
+    type        = "file"
+    path        = "docs/plan.md"
+    description = "plan doc"
+  }
 
   tool_use "run_lint" {
     tool_id = external_tool.linter.id
@@ -172,6 +178,7 @@ worker "plan_step" {
   }
 
   qc {
+    profile = "opus-audit"
     criteria = {
       check = "Verify using ${var.api_secret}"
     }
@@ -186,6 +193,12 @@ worker "after_local" {
   based_source  = local.plan_branch
   model         = "gpt-5"
   system_prompt = "Follow local branch."
+
+  import_artifact "plan_doc" {
+    desc    = "plan doc"
+    path    = "inputs/plan.md"
+    sources = [worker.plan_step.artifact.plan_doc]
+  }
 }
 
 dynamic_worker "verify" {
@@ -300,6 +313,7 @@ output "secret_out" {
 	}
 
 	// Sensitivity marks preserved on exported nodes
+	assert.False(t, byAddr["sandbox.go_env"].Config.Type().HasAttribute("entrypoint"))
 	assert.True(t, byAddr["model_provider.openai"].Config.GetAttr("api_key").HasMark(golden.SensitiveMark))
 	assert.True(t, byAddr["model_provider.openai"].Config.GetAttr("headers").Index(cty.StringVal("X-Secret")).HasMark(golden.SensitiveMark))
 	assert.True(t, byAddr["mcp_server.docs_http"].Config.GetAttr("http").GetAttr("bearer_token").HasMark(golden.SensitiveMark))
@@ -309,6 +323,12 @@ output "secret_out" {
 	assert.True(t, byAddr["harness.antigravity"].Config.GetAttr("options").GetAttr("secret").HasMark(golden.SensitiveMark))
 	assert.True(t, byAddr["worker.plan_step"].Config.GetAttr("prompt").HasMark(golden.SensitiveMark))
 	assert.True(t, byAddr["worker.plan_step"].Config.GetAttr("qc").GetAttr("criteria").GetAttr("check").HasMark(golden.SensitiveMark))
+	assert.True(t, byAddr["worker.plan_step"].Config.GetAttr("qc").GetAttr("sandbox").IsNull())
+	assert.Equal(t, "opus-audit", byAddr["worker.plan_step"].Config.GetAttr("qc").GetAttr("profile").AsString())
+	assert.Equal(t, "docs/plan.md", byAddr["worker.plan_step"].Config.GetAttr("artifacts").GetAttr("plan_doc").GetAttr("path").AsString())
+	assert.Equal(t, "/.sofa/artifacts/docs/plan.md", byAddr["worker.plan_step"].Config.GetAttr("artifacts").GetAttr("plan_doc").GetAttr("container_path").AsString())
+	assert.Equal(t, "inputs/plan.md", byAddr["worker.after_local"].Config.GetAttr("imports").GetAttr("plan_doc").GetAttr("path").AsString())
+	assert.Equal(t, "/.sofa/imports/inputs/plan.md", byAddr["worker.after_local"].Config.GetAttr("imports").GetAttr("plan_doc").GetAttr("container_path").AsString())
 
 	// Child module plan & deferred validations
 	modNode := byAddr["module.audit"]
@@ -337,6 +357,12 @@ output "secret_out" {
 
 	displayText, err := plan.Display(restored)
 	require.NoError(t, err)
+	assert.False(t, restored.Nodes()[0].Config.Type().HasAttribute("entrypoint"))
+	for _, n := range restored.Nodes() {
+		if n.Kind == "sandbox" {
+			assert.False(t, n.Config.Type().HasAttribute("entrypoint"))
+		}
+	}
 	for _, secret := range []string{
 		"sk-root-api-secret",
 		"mcp-hdr-secret",
@@ -506,6 +532,64 @@ module "child" {
 		assert.NotContains(t, displayText, secret)
 	}
 	assert.Contains(t, displayText, `"<sensitive>"`)
+}
+
+func TestExportPlanQCSandboxOverrideRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	writeExportHCL(t, filepath.Join(rootDir, "main.sofa.hcl"), `
+sandbox "work_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/work:1.27"
+}
+
+sandbox "sec_audit" {
+  runtime = "podman"
+  image   = "ghcr.io/example/audit:1.27"
+}
+
+harness "local" {}
+
+worker "implement" {
+  based_source  = "main"
+  sandbox       = sandbox.work_env
+  model         = "gpt-5"
+  system_prompt = "Implement"
+
+  qc {
+    sandbox  = sandbox.sec_audit
+    profile  = "opus-audit"
+    criteria = { audit = "ok" }
+  }
+}
+`)
+
+	loaded, diags, err := config.LoadDirectoryContext(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.False(t, diags.HasErrors(), diags.Error())
+
+	cfg := planner.NewSofaConfig(planner.ConfigArgs{Context: context.Background(), Directory: rootDir})
+	require.NoError(t, cfg.Init(loaded.Blocks))
+	require.NoError(t, cfg.RunPlan())
+
+	exported, err := cfg.ExportPlan(planner.ExportOptions{})
+	require.NoError(t, err)
+
+	encoded, err := plan.Marshal(exported)
+	require.NoError(t, err)
+	restored, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	byAddr := make(map[string]plan.NodeSpec)
+	for _, n := range restored.Nodes() {
+		byAddr[n.Address] = n
+	}
+	impl := byAddr["worker.implement"]
+	assert.Contains(t, impl.Dependencies, "sandbox.work_env")
+	assert.Contains(t, impl.Dependencies, "sandbox.sec_audit")
+	assert.Equal(t, "sandbox.sec_audit", impl.Config.GetAttr("qc").GetAttr("sandbox").GetAttr("address").AsString())
+	assert.Equal(t, "opus-audit", impl.Config.GetAttr("qc").GetAttr("profile").AsString())
 }
 
 func writeExportHCL(t *testing.T, path, content string) {

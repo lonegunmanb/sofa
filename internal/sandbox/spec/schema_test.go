@@ -3,6 +3,10 @@ package spec
 import (
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/lonegunmanb/golden"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,4 +69,42 @@ func TestSandboxBlockDefaultsNetworkToBridge(t *testing.T) {
 		Image:   "ghcr.io/example/go:1.27",
 	}
 	require.Equal(t, "bridge", block.SandboxConfig().Network)
+}
+
+func TestSandboxBlockRejectsEntrypointViaGoldenDecode(t *testing.T) {
+	for _, src := range []string{
+		`sandbox "go_env" {
+  runtime    = "podman"
+  image      = "ghcr.io/example/go:1.27"
+  entrypoint = ["/bin/sh"]
+}`,
+		`sandbox "go_env" {
+  runtime    = "podman"
+  image      = "ghcr.io/example/go:1.27"
+  entrypoint = null
+}`,
+	} {
+		sf, sDiags := hclsyntax.ParseConfig([]byte(src), "sandbox.sofa.hcl", hcl.InitialPos)
+		require.False(t, sDiags.HasErrors(), sDiags.Error())
+		wf, wDiags := hclwrite.ParseConfig([]byte(src), "sandbox.sofa.hcl", hcl.InitialPos)
+		require.False(t, wDiags.HasErrors(), wDiags.Error())
+
+		sb := sf.Body.(*hclsyntax.Body).Blocks[0]
+		wrapped := &hclsyntax.Block{
+			Type:            sb.Type,
+			Labels:          append([]string{""}, sb.Labels...),
+			Body:            sb.Body,
+			TypeRange:       sb.TypeRange,
+			LabelRanges:     sb.LabelRanges,
+			OpenBraceRange:  sb.OpenBraceRange,
+			CloseBraceRange: sb.CloseBraceRange,
+		}
+		hb := golden.NewHclBlock(wrapped, wf.Body().Blocks()[0], nil)
+		golden.RegisterBlock(&SandboxBlock{})
+		base := golden.NewBasicConfig(t.TempDir(), "sofa", "sofa", nil, nil, nil)
+		block := &SandboxBlock{BaseBlock: golden.NewBaseBlock(base, hb)}
+		err := golden.Decode(block)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "entrypoint")
+	}
 }

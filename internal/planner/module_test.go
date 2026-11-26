@@ -33,6 +33,7 @@ variable "spec_artifact" {
     kind        = string
     type        = string
     path        = string
+    rel_path    = string
     description = string
     required    = bool
     non_empty   = bool

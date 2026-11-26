@@ -770,7 +770,8 @@ func validateNestedBlockSchema(
 }
 
 func (w *WorkerBlock) decodeNestedDeclarations(block *golden.HclBlock, ctx *hcl.EvalContext) error {
-	paths := map[string]string{}
+	artifactPaths := map[string]string{}
+	importRelPaths := map[string]string{}
 	for _, nested := range block.NestedBlocks() {
 		switch nested.Type {
 		case "artifact":
@@ -781,10 +782,10 @@ func (w *WorkerBlock) decodeNestedDeclarations(block *golden.HclBlock, ctx *hcl.
 			if _, exists := w.artifacts[art.Name]; exists {
 				return fail("worker %q artifact %q is declared more than once", w.Name(), art.Name)
 			}
-			if other, exists := paths[art.Path]; exists {
+			if other, exists := findConflictingPath(artifactPaths, art.Path); exists {
 				return fail("artifact %q path conflicts with %q", art.Name, other)
 			}
-			paths[art.Path] = art.Name
+			artifactPaths[art.Path] = art.Name
 			w.artifacts[art.Name] = art
 		case "import_artifact":
 			ownerType := w.ownerBlockType
@@ -798,22 +799,33 @@ func (w *WorkerBlock) decodeNestedDeclarations(block *golden.HclBlock, ctx *hcl.
 			if _, exists := w.planned.Imports[imported.Name]; exists {
 				return fail("worker %q import_artifact %q is declared more than once", w.Name(), imported.Name)
 			}
-			imported.Path = effectiveImportPath(imported)
-			if other, exists := paths[imported.Path]; exists {
+			imported.Path = effectiveImportRelPath(imported)
+			if other, exists := findConflictingPath(importRelPaths, imported.Path); exists {
 				return fail("import_artifact %q path conflicts with %q", imported.Name, other)
 			}
-			paths[imported.Path] = imported.Name
+			importRelPaths[imported.Path] = imported.Name
 			if w.planned.Imports == nil {
 				w.planned.Imports = map[string]ImportArtifact{}
 			}
 			w.planned.Imports[imported.Name] = imported
 			w.importPaths[imported.Name] = cty.ObjectVal(map[string]cty.Value{
-				"path": cty.StringVal(imported.Path),
+				"path": cty.StringVal(imported.ContainerPath()),
 				"desc": cty.StringVal(imported.Desc),
 			})
 		}
 	}
 	return nil
+}
+
+func findConflictingPath(existing map[string]string, candidate string) (string, bool) {
+	for existingPath, owner := range existing {
+		if existingPath == candidate ||
+			strings.HasPrefix(candidate, existingPath+"/") ||
+			strings.HasPrefix(existingPath, candidate+"/") {
+			return owner, true
+		}
+	}
+	return "", false
 }
 
 func (w *WorkerBlock) decodeCore(block *golden.HclBlock, ctx *hcl.EvalContext, deferred *bool) error {

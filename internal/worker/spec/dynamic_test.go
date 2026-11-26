@@ -616,3 +616,58 @@ dynamic_worker "bad_capsule" {
 		require.Error(t, err)
 	}
 }
+
+func TestDynamicWorkerQCSandboxAndProfileValidation(t *testing.T) {
+	validHCL := `
+dynamic_worker "audit" {
+  dynamic "worker" {
+    for_each = toset(["a"])
+    iterator = item
+
+    content {
+      based_source  = "main"
+      sandbox       = sandbox.go_env
+      harness       = harness.local
+      model         = "gpt-5"
+      system_prompt = "Audit ${item.key}"
+
+      qc {
+        sandbox  = sandbox.go_env
+        profile  = "opus-audit"
+        criteria = { ok = "yes" }
+      }
+    }
+  }
+}
+`
+	d, err := decodeDynamicWorkerHCL(t, validHCL, nil)
+	require.NoError(t, err)
+	cfg := d.DynamicWorkerConfig()
+	require.NotNil(t, cfg.Content.QC)
+	require.Equal(t, "sandbox.go_env", cfg.Content.QC.Sandbox.GetAttr("address").AsString())
+	require.Equal(t, "opus-audit", cfg.Content.QC.Profile)
+	require.Contains(t, cfg.ContentTemplate, "sandbox.go_env")
+	require.Contains(t, cfg.ContentTemplate, `"opus-audit"`)
+
+	invalidHCL := `
+dynamic_worker "audit" {
+  dynamic "worker" {
+    for_each = toset(["a"])
+    content {
+      based_source  = "main"
+      sandbox       = sandbox.go_env
+      harness       = harness.local
+      model         = "gpt-5"
+      system_prompt = "Audit"
+
+      qc {
+        sandbox  = harness.local
+        criteria = { ok = "yes" }
+      }
+    }
+  }
+}
+`
+	_, err = decodeDynamicWorkerHCL(t, invalidHCL, nil)
+	require.Error(t, err)
+}

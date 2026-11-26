@@ -60,8 +60,10 @@ worker "plan" {
 	planValue := cfg.EvalContext().Variables["worker"].GetAttr("plan")
 	require.True(t, planValue.Type().HasAttribute("work_branch"))
 	require.True(t, planValue.Type().HasAttribute("artifact"))
-	require.Equal(t, "docs/design.md",
+	require.Equal(t, "/.sofa/artifacts/docs/design.md",
 		planValue.GetAttr("artifact").GetAttr("design").GetAttr("path").AsString())
+	require.Equal(t, "docs/design.md",
+		planValue.GetAttr("artifact").GetAttr("design").GetAttr("rel_path").AsString())
 	ancestors, err := cfg.GetAncestors("worker.plan")
 	require.NoError(t, err)
 	require.Contains(t, ancestors, "worker.specify")
@@ -93,10 +95,12 @@ worker "specify" {
 		}
 	}
 	require.NotNil(t, specifyBlock)
-	require.Equal(t, ".sofa/imports/design", specifyBlock.WorkerConfig().Imports["design"].Path)
+	require.Equal(t, "design", specifyBlock.WorkerConfig().Imports["design"].Path)
+	require.Equal(t, "/.sofa/imports/design", specifyBlock.WorkerConfig().Imports["design"].ContainerPath())
 
-	conflictDir := t.TempDir()
-	writePlannerFile(t, filepath.Join(conflictDir, "workflow.sofa.hcl"), workerInfrastructure+`
+	// Same relative path in artifact and import_artifact must NOT conflict (disjoint container mount roots).
+	disjointDir := t.TempDir()
+	writePlannerFile(t, filepath.Join(disjointDir, "workflow.sofa.hcl"), workerInfrastructure+`
 worker "specify" {
   based_source  = "main"
   model         = "test-model"
@@ -104,23 +108,161 @@ worker "specify" {
 
   artifact "spec" {
     type        = "file"
-    path        = ".sofa/imports/design"
+    path        = "spec.md"
     description = "spec"
   }
-  import_artifact "design" {
-    desc    = "design"
+  import_artifact "doc" {
+    desc    = "doc"
+    path    = "spec.md"
     sources = []
   }
 }
 `)
-	cfg = newTestPlanner(t, conflictDir, nil)
-	loaded, diags, err := config.LoadDirectoryContext(context.Background(), conflictDir)
+	cfg = newTestPlanner(t, disjointDir, nil)
+	initPlanner(t, cfg, disjointDir)
+	require.NoError(t, cfg.RunPlan())
+
+	// Intra-artifact and intra-import_artifact overlapping paths MUST fail.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "duplicate artifact paths",
+			body: workerInfrastructure + `
+worker "specify" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "specify"
+
+  artifact "a" {
+    type        = "file"
+    path        = "spec.md"
+    description = "a"
+  }
+  artifact "b" {
+    type        = "file"
+    path        = "spec.md"
+    description = "b"
+  }
+}`,
+		},
+		{
+			name: "nested artifact dir and file overlap",
+			body: workerInfrastructure + `
+worker "specify" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "specify"
+
+  artifact "dir" {
+    type        = "directory"
+    path        = "out"
+    description = "dir"
+  }
+  artifact "nested" {
+    type        = "file"
+    path        = "out/a.txt"
+    description = "nested"
+  }
+}`,
+		},
+		{
+			name: "nested import_artifact dir and file overlap",
+			body: workerInfrastructure + `
+worker "specify" {
+  based_source  = "main"
+  model         = "test-model"
+  system_prompt = "specify"
+
+  import_artifact "dir" {
+    desc    = "dir"
+    path    = "inputs"
+    sources = []
+  }
+  import_artifact "nested" {
+    desc    = "nested"
+    path    = "inputs/spec.md"
+    sources = []
+  }
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conflictDir := t.TempDir()
+			writePlannerFile(t, filepath.Join(conflictDir, "workflow.sofa.hcl"), tc.body)
+			cfg := newTestPlanner(t, conflictDir, nil)
+			loaded, diags, err := config.LoadDirectoryContext(context.Background(), conflictDir)
+			require.NoError(t, err)
+			require.False(t, diags.HasErrors(), diags.Error())
+			err = cfg.Init(loaded.Blocks)
+			require.NoError(t, err)
+			err = cfg.RunPlan()
+			require.ErrorContains(t, err, "conflicts")
+		})
+	}
+}
+
+func TestWorkerQCIndependentSandboxAndProfileDAG(t *testing.T) {
+	dir := t.TempDir()
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+sandbox "work_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/work:1.27"
+}
+
+sandbox "sec_audit" {
+  runtime = "podman"
+  image   = "ghcr.io/example/audit:1.27"
+}
+
+harness "local" {}
+
+worker "implement" {
+  based_source  = "main"
+  sandbox       = sandbox.work_env
+  model         = "gpt-5"
+  profile       = "dev-fast"
+  system_prompt = "implement"
+
+  qc {
+    sandbox  = sandbox.sec_audit
+    profile  = "opus-audit"
+    criteria = { security = "must pass audit" }
+  }
+}
+
+dynamic_worker "sweep" {
+  dynamic "worker" {
+    for_each = toset(["a"])
+    content {
+      based_source  = worker.implement.work_branch
+      sandbox       = sandbox.work_env
+      model         = "gpt-5"
+      system_prompt = "sweep ${worker.key}"
+
+      qc {
+        sandbox  = sandbox.sec_audit
+        profile  = "opus-audit"
+        criteria = { audit = "ok" }
+      }
+    }
+  }
+}
+`)
+
+	cfg := newTestPlanner(t, dir, nil)
+	initPlanner(t, cfg, dir)
+	require.NoError(t, cfg.RunPlan())
+
+	ancestors, err := cfg.GetAncestors("worker.implement")
 	require.NoError(t, err)
-	require.False(t, diags.HasErrors(), diags.Error())
-	err = cfg.Init(loaded.Blocks)
+	require.Contains(t, ancestors, "sandbox.work_env")
+	require.Contains(t, ancestors, "sandbox.sec_audit")
+
+	dynAncestors, err := cfg.GetAncestors("dynamic_worker.sweep")
 	require.NoError(t, err)
-	err = cfg.RunPlan()
-	require.ErrorContains(t, err, "conflicts")
+	require.Contains(t, dynAncestors, "sandbox.sec_audit")
 }
 
 func TestWorkerStaticForEachUsesGoldenExpansion(t *testing.T) {

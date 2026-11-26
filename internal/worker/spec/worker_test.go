@@ -835,7 +835,7 @@ func TestP11DeferredExpressionCompleteness(t *testing.T) {
 	require.Contains(t, expr, "retry =")
 	require.Contains(t, expr, "artifact =")
 	require.Contains(t, expr, "import_artifact =")
-	require.Contains(t, expr, `".sofa/imports/spec"`)
+	require.Contains(t, expr, `"/.sofa/imports/spec"`)
 	require.Contains(t, expr, "gatekeeper =")
 	require.Contains(t, expr, "qc =")
 	require.Contains(t, expr, "fallback =")
@@ -1096,4 +1096,100 @@ func TestFallbackWithDynamicGatekeeperAndQuotedTarget(t *testing.T) {
 }`, validWorkerAttrs())
 	_, err = decodeWorkerHCL(t, quotedTarget, otherWorkerVars)
 	require.Error(t, err)
+}
+
+func TestQCSandboxAndProfileOverrides(t *testing.T) {
+	// Default (omitted) and explicit null qc.sandbox normalize to null empty object.
+	for _, qcBody := range []string{
+		"criteria = { a = \"b\" }",
+		"sandbox  = null\n    profile  = null\n    criteria = { a = \"b\" }",
+	} {
+		w, err := decodeWorkerHCL(t, fmt.Sprintf("worker \"w\" { %s\n  qc {\n    %s\n  }\n}", validWorkerAttrs(), qcBody), nil)
+		require.NoError(t, err)
+		qc := w.WorkerConfig().QC
+		require.NotNil(t, qc)
+		require.True(t, qc.Sandbox.IsNull())
+		require.Equal(t, "", qc.Profile)
+	}
+
+	// Explicit qc.sandbox and qc.profile succeed.
+	w, err := decodeWorkerHCL(t, fmt.Sprintf(`worker "w" { %s
+  qc {
+    sandbox  = sandbox.go_env
+    profile  = "opus-audit"
+    criteria = { a = "b" }
+  }
+}`, validWorkerAttrs()), nil)
+	require.NoError(t, err)
+	qc := w.WorkerConfig().QC
+	require.NotNil(t, qc)
+	require.False(t, qc.Sandbox.IsNull())
+	require.Equal(t, "sandbox.go_env", qc.Sandbox.GetAttr("address").AsString())
+	require.Equal(t, "opus-audit", qc.Profile)
+
+	// Invalid qc.sandbox and blank qc.profile MUST fail.
+	for _, badQC := range []string{
+		"sandbox  = harness.local\n    criteria = { a = \"b\" }",
+		"profile  = \"   \"\n    criteria = { a = \"b\" }",
+		"profile  = 42\n    criteria = { a = \"b\" }",
+	} {
+		_, err := decodeWorkerHCL(t, fmt.Sprintf("worker \"w\" { %s\n  qc {\n    %s\n  }\n}", validWorkerAttrs(), badQC), nil)
+		require.Error(t, err)
+	}
+}
+
+func TestContainerExternalArtifactAndImportPaths(t *testing.T) {
+	vars := map[string]cty.Value{
+		"worker": cty.ObjectVal(map[string]cty.Value{
+			"up": cty.ObjectVal(map[string]cty.Value{
+				"artifact": cty.ObjectVal(map[string]cty.Value{
+					"spec": cty.ObjectVal(map[string]cty.Value{
+						"id":   cty.UnknownVal(cty.String),
+						"name": cty.StringVal("spec"),
+						"kind": cty.StringVal("artifact"),
+					}),
+				}),
+			}),
+		}),
+	}
+	hclCode := fmt.Sprintf(`worker "w" { %s
+  prompt = "$${artifact("design").path}|$${artifact("design").rel_path}|$${import_artifact.defaulted.path}|$${import_artifact.explicit.path}"
+
+  artifact "design" {
+    type        = "file"
+    path        = "docs/plan.md"
+    description = "Plan"
+  }
+
+  import_artifact "defaulted" {
+    desc    = "defaulted"
+    sources = [worker.up.artifact.spec]
+  }
+
+  import_artifact "explicit" {
+    desc    = "explicit"
+    path    = "inputs/plan.md"
+    sources = [worker.up.artifact.spec]
+  }
+}`, validWorkerAttrs())
+	hclCode = strings.ReplaceAll(hclCode, "$$", "$")
+	w, err := decodeWorkerHCL(t, hclCode, vars)
+	require.NoError(t, err)
+	cfg := w.WorkerConfig()
+	require.Equal(t, "/.sofa/artifacts/docs/plan.md|docs/plan.md|/.sofa/imports/defaulted|/.sofa/imports/inputs/plan.md", cfg.Prompt.AsString())
+	artVal := w.Values()["artifact"].GetAttr("design")
+	require.Equal(t, "/.sofa/artifacts/docs/plan.md", artVal.GetAttr("path").AsString())
+	require.Equal(t, "docs/plan.md", artVal.GetAttr("rel_path").AsString())
+
+	// Absolute or escaping artifact/import paths MUST fail.
+	for _, badPath := range []string{"/etc/passwd", "../escape", "."} {
+		_, err := decodeWorkerHCL(t, fmt.Sprintf(`worker "w" { %s
+  artifact "out" {
+    type        = "file"
+    path        = %q
+    description = "out"
+  }
+}`, validWorkerAttrs(), badPath), nil)
+		require.Error(t, err)
+	}
 }

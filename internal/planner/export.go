@@ -479,12 +479,11 @@ func encodeSandboxConfig(cfg sandboxspec.SandboxConfig) cty.Value {
 		})
 	}
 	return cty.ObjectVal(map[string]cty.Value{
-		"runtime":    cty.StringVal(cfg.Runtime),
-		"image":      cty.StringVal(cfg.Image),
-		"entrypoint": stringListVal(cfg.Entrypoint),
-		"network":    cty.StringVal(cfg.Network),
-		"mounts":     mountsVal,
-		"resources":  resourcesVal,
+		"runtime":   cty.StringVal(cfg.Runtime),
+		"image":     cty.StringVal(cfg.Image),
+		"network":   cty.StringVal(cfg.Network),
+		"mounts":    mountsVal,
+		"resources": resourcesVal,
 	})
 }
 
@@ -672,12 +671,13 @@ func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
 	artifacts := make(map[string]cty.Value, len(cfg.Artifacts))
 	for name, art := range cfg.Artifacts {
 		artifacts[name] = cty.ObjectVal(map[string]cty.Value{
-			"name":        cty.StringVal(art.Name),
-			"type":        cty.StringVal(art.Type),
-			"path":        cty.StringVal(art.Path),
-			"description": cty.StringVal(art.Description),
-			"required":    cty.BoolVal(art.Required),
-			"non_empty":   cty.BoolVal(art.NonEmpty),
+			"name":           cty.StringVal(art.Name),
+			"type":           cty.StringVal(art.Type),
+			"path":           cty.StringVal(art.Path),
+			"container_path": cty.StringVal(art.ContainerPath()),
+			"description":    cty.StringVal(art.Description),
+			"required":       cty.BoolVal(art.Required),
+			"non_empty":      cty.BoolVal(art.NonEmpty),
 		})
 	}
 	artifactsVal := cty.EmptyObjectVal
@@ -692,10 +692,11 @@ func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
 			srcs = cty.EmptyTupleVal
 		}
 		imports[name] = cty.ObjectVal(map[string]cty.Value{
-			"name":    cty.StringVal(imp.Name),
-			"desc":    cty.StringVal(imp.Desc),
-			"path":    cty.StringVal(imp.Path),
-			"sources": srcs,
+			"name":           cty.StringVal(imp.Name),
+			"desc":           cty.StringVal(imp.Desc),
+			"path":           cty.StringVal(workerspec.EffectiveImportRelPath(imp)),
+			"container_path": cty.StringVal(imp.ContainerPath()),
+			"sources":        srcs,
 		})
 	}
 	importsVal := cty.EmptyObjectVal
@@ -709,6 +710,10 @@ func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
 		if criteria == cty.NilVal {
 			criteria = cty.MapValEmpty(cty.String)
 		}
+		qcS := cfg.QC.Sandbox
+		if qcS == cty.NilVal {
+			qcS = cty.NullVal(cty.EmptyObject)
+		}
 		qcH := cfg.QC.Harness
 		if qcH == cty.NilVal {
 			qcH = cty.NullVal(cty.EmptyObject)
@@ -719,10 +724,12 @@ func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
 		}
 		qcVal = cty.ObjectVal(map[string]cty.Value{
 			"criteria":           criteria,
+			"sandbox":            qcS,
 			"harness":            qcH,
 			"model_provider":     qcMP,
 			"model_provider_set": cty.BoolVal(cfg.QC.ModelProviderSet),
 			"model":              cty.StringVal(cfg.QC.Model),
+			"profile":            cty.StringVal(cfg.QC.Profile),
 			"reasoning_effort":   cty.StringVal(cfg.QC.ReasoningEffort),
 			"permission":         cty.StringVal(cfg.QC.Permission),
 			"max_qc_rounds":      cty.NumberIntVal(int64(cfg.QC.MaxQCRounds)),

@@ -43,9 +43,9 @@ func buildDeferredExpression(
 	builder.WriteString("import_artifact = {\n")
 	for _, imp := range nestedBlocksByType(block, "import_artifact") {
 		name := labelOf(imp)
-		effectivePath := ".sofa/imports/" + name
-		if resolved, ok := imports[name]; ok && resolved.Path != "" {
-			effectivePath = resolved.Path
+		effectivePath := ImportArtifact{Name: name}.ContainerPath()
+		if resolved, ok := imports[name]; ok {
+			effectivePath = resolved.ContainerPath()
 		}
 		fmt.Fprintf(&builder, "%s = ", strconv.Quote(name))
 		writeDeferredObject(&builder, imp, nil, map[string]string{

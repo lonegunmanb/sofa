@@ -16,9 +16,11 @@ const DefaultMaxQCRounds = 3
 var (
 	qcAllowedAttrs = map[string]struct{}{
 		"criteria":          {},
+		"sandbox":           {},
 		"harness":           {},
 		"model_provider":    {},
 		"model":             {},
+		"profile":           {},
 		"reasoning_effort":  {},
 		"permission":        {},
 		"max_qc_rounds":     {},
@@ -37,10 +39,12 @@ var (
 
 type QCConfig struct {
 	Criteria         cty.Value
+	Sandbox          cty.Value
 	Harness          cty.Value
 	ModelProvider    cty.Value
 	ModelProviderSet bool
 	Model            string
+	Profile          string
 	ReasoningEffort  string
 	Permission       string
 	MaxQCRounds      int
@@ -107,6 +111,7 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 
 	result := QCConfig{
 		Criteria:      criteria,
+		Sandbox:       cty.NullVal(cty.EmptyObject),
 		Harness:       cty.NullVal(cty.EmptyObject),
 		ModelProvider: cty.NullVal(cty.EmptyObject),
 		MaxQCRounds:   maxRounds,
@@ -119,6 +124,14 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 			return QCConfig{}, fail("qc model must not be empty")
 		}
 		result.Model = model
+	}
+	if profile, set, err := optionalKnownString(block, ctx, "profile", "qc"); err != nil {
+		return QCConfig{}, err
+	} else if set {
+		if strings.TrimSpace(profile) == "" {
+			return QCConfig{}, fail("qc profile must not be empty")
+		}
+		result.Profile = profile
 	}
 	if effort, set, err := optionalKnownString(block, ctx, "reasoning_effort", "qc"); err != nil {
 		return QCConfig{}, err
@@ -162,18 +175,11 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 		return QCConfig{}, err
 	}
 
-	if attr, ok := block.Attributes()["harness"]; ok {
-		val, diags := attr.Expr.Value(ctx)
-		if diags.HasErrors() {
-			return QCConfig{}, diags
-		}
-		unmarked, _ := val.UnmarkDeep()
-		if !unmarked.IsNull() {
-			if err := validateBlockReference(val, "harness", "qc harness"); err != nil {
-				return QCConfig{}, err
-			}
-			result.Harness = val
-		}
+	if result.Sandbox, err = optionalBlockReference(block, ctx, "sandbox", "sandbox", "qc"); err != nil {
+		return QCConfig{}, err
+	}
+	if result.Harness, err = optionalBlockReference(block, ctx, "harness", "harness", "qc"); err != nil {
+		return QCConfig{}, err
 	}
 	if attr, ok := block.Attributes()["model_provider"]; ok {
 		result.ModelProviderSet = true
