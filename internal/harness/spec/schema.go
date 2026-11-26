@@ -403,13 +403,23 @@ func (b *HarnessBlock) ExecuteDuringPlan() error {
 	cloned := cfg.Clone()
 	b.plannedCfg = &cloned
 	b.planned = cty.ObjectVal(map[string]cty.Value{
-		"address": cty.StringVal(b.Address()),
+		"address": cty.StringVal(b.CanonicalAddress()),
 		"kind":    cty.StringVal("harness"),
 		"name":    cty.StringVal(b.Name()),
 		"source":  optionalStringValue(b.sourceVal, cfg.Source),
 		"version": optionalStringValue(b.versionVal, cfg.Version),
 	})
 	return nil
+}
+
+// CanonicalAddress returns the module-qualified canonical address when nested in a child module.
+func (b *HarnessBlock) CanonicalAddress() string {
+	if b.BaseBlock != nil {
+		if provider, ok := b.Config().(interface{ CanonicalAddress(string) string }); ok {
+			return provider.CanonicalAddress(b.Address())
+		}
+	}
+	return b.Address()
 }
 
 // Value returns the planned cty.Object value, or cty.DynamicVal before planning.

@@ -17,7 +17,7 @@ import (
 	mcpspec "github.com/lonegunmanb/sofa/internal/mcp/spec"
 	mergespec "github.com/lonegunmanb/sofa/internal/merge/spec"
 	modulespec "github.com/lonegunmanb/sofa/internal/module/spec"
-	providerpkg "github.com/lonegunmanb/sofa/internal/provider"
+	providerspec "github.com/lonegunmanb/sofa/internal/provider"
 	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
 	sourcespec "github.com/lonegunmanb/sofa/internal/source"
 	specpkg "github.com/lonegunmanb/sofa/internal/spec"
@@ -29,6 +29,8 @@ import (
 type ConfigArgs struct {
 	Context                  context.Context
 	Directory                string
+	ModulesDirectory         string
+	BundlePath               string
 	VarConfigDir             *string
 	IgnoreUnknownVariables   bool
 	CliFlagAssignedVariables []golden.CliFlagAssignedVariables
@@ -36,8 +38,19 @@ type ConfigArgs struct {
 
 type SofaConfig struct {
 	*golden.BaseConfig
-	directory          string
-	sensitiveVariables map[string]struct{}
+	directory           string
+	modulesDirectory    string
+	bundlePath          string
+	addressPrefix       string
+	moduleStack         []string
+	incomingInherited   InheritedSingletons
+	injectedSingletons  InheritedSingletons
+	sensitiveVariables  map[string]struct{}
+	variableSourceURLs  map[string][]string
+	forEachModuleNames  map[string]struct{}
+	deferredValidations map[string][]specpkg.Condition
+	parentConfig        *SofaConfig
+	isChildModule       bool
 }
 
 var registerBlocksOnce sync.Once
@@ -52,7 +65,7 @@ func RegisterBlocks() {
 		defaults.SetDefaults(&struct{}{})
 		golden.RegisterBlock(&sourcespec.SourceBlock{})
 		golden.RegisterBlock(&sourcespec.PreserveBlock{})
-		golden.RegisterBlock(&providerpkg.ModelProviderBlock{})
+		golden.RegisterBlock(&providerspec.ModelProviderBlock{})
 		golden.RegisterBlock(&mcpspec.ServerBlock{})
 		golden.RegisterBlock(&sandboxspec.SandboxBlock{})
 		golden.RegisterBlock(&harnessspec.HarnessBlock{})
@@ -61,6 +74,7 @@ func RegisterBlocks() {
 		golden.RegisterBlock(&workerspec.WorkerBlock{})
 		golden.RegisterBlock(&workerspec.DynamicWorkerBlock{})
 		golden.RegisterBlock(&mergespec.MergeBlock{})
+		golden.RegisterBlock(&modulespec.ModuleBlock{})
 	})
 }
 
@@ -70,6 +84,12 @@ func NewSofaConfig(args ConfigArgs) *SofaConfig {
 	}
 	if absolute, err := filepath.Abs(args.Directory); err == nil {
 		args.Directory = filepath.Clean(absolute)
+	}
+	modulesDir := strings.TrimSpace(args.ModulesDirectory)
+	if modulesDir != "" {
+		if absolute, err := filepath.Abs(modulesDir); err == nil {
+			modulesDir = filepath.Clean(absolute)
+		}
 	}
 
 	RegisterBlocks()
@@ -82,19 +102,55 @@ func NewSofaConfig(args ConfigArgs) *SofaConfig {
 		IgnoreUnknownVariables:   args.IgnoreUnknownVariables,
 		CliFlagAssignedVariables: args.CliFlagAssignedVariables,
 	})
+	var stack []string
+	if norm, err := normalizeModuleDir(args.Directory); err == nil {
+		stack = []string{norm}
+	} else if args.Directory != "" {
+		stack = []string{args.Directory}
+	}
 	return &SofaConfig{
-		BaseConfig:         base,
-		directory:          args.Directory,
-		sensitiveVariables: make(map[string]struct{}),
+		BaseConfig:          base,
+		directory:           args.Directory,
+		modulesDirectory:    modulesDir,
+		bundlePath:          filepath.ToSlash(strings.TrimSpace(args.BundlePath)),
+		moduleStack:         stack,
+		sensitiveVariables:  make(map[string]struct{}),
+		variableSourceURLs:  make(map[string][]string),
+		forEachModuleNames:  make(map[string]struct{}),
+		deferredValidations: make(map[string][]specpkg.Condition),
 	}
 }
 
 // Init validates sofa-specific declaration prerequisites and delegates graph
 // construction and pre-plan work to golden.
 func (c *SofaConfig) Init(blocks []*golden.HclBlock) error {
-	preparedBlocks, err := applyRootDefaults(blocks)
+	preparedBlocks, usedInherited, err := applyModuleDefaults(
+		blocks,
+		c.addressPrefix,
+		c.moduleDisplayName(),
+		c.incomingInherited,
+	)
 	if err != nil {
 		return err
+	}
+	c.injectedSingletons = usedInherited
+	c.forEachModuleNames = make(map[string]struct{})
+	seenModules := make(map[string]string)
+	for _, block := range preparedBlocks {
+		if block != nil && block.Type == "module" && len(block.Labels) == 2 {
+			label := block.Labels[1]
+			lower := strings.ToLower(label)
+			if prev, exists := seenModules[lower]; exists {
+				if prev == label {
+					return fmt.Errorf("module %q is declared more than once", label)
+				}
+				return fmt.Errorf("module %q conflicts with module %q", label, prev)
+			}
+			seenModules[lower] = label
+			if _, hasForEach := block.Body.Attributes["for_each"]; hasForEach {
+				c.forEachModuleNames[label] = struct{}{}
+			}
+		}
 	}
 	if err := validateWorkerFallbacks(preparedBlocks); err != nil {
 		return err
@@ -176,8 +232,15 @@ func (c *SofaConfig) EvalContext() *hcl.EvalContext {
 		ctx.Variables["worker"] = workerValue.GetAttr("")
 	}
 
+	c.injectInheritedSingletonVariables(ctx)
+	c.normalizeForEachModuleVariables(ctx)
+
+	modulePath := filepath.ToSlash(c.directory)
+	if c.bundlePath != "" {
+		modulePath = filepath.ToSlash(c.bundlePath)
+	}
 	ctx.Variables["path"] = cty.ObjectVal(map[string]cty.Value{
-		"module": cty.StringVal(filepath.ToSlash(c.directory)),
+		"module": cty.StringVal(modulePath),
 	})
 	return ctx
 }
@@ -268,6 +331,9 @@ func (c *SofaConfig) LookupSourceURL(name string) (string, bool) {
 func (c *SofaConfig) SingleRootSourceURL() (string, int) {
 	ctx := c.EvalContext()
 	sources := golden.Blocks[*sourcespec.SourceBlock](c)
+	if len(sources) == 0 && c.parentConfig != nil {
+		return c.parentConfig.SingleRootSourceURL()
+	}
 	if len(sources) == 1 {
 		if u := sources[0].SourceConfig().URL; u != "" {
 			return u, 1
@@ -309,20 +375,80 @@ func (c *SofaConfig) LookupUpstreamSourceURLs(address string) ([]string, bool) {
 	return c.LookupWorkerSourceURLs(address)
 }
 
+func (c *SofaConfig) LookupVariableSourceURLs(name string) ([]string, bool) {
+	urls, ok := c.variableSourceURLs[name]
+	if !ok || len(urls) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), urls...), true
+}
+
+func (c *SofaConfig) LookupModuleOutputSourceURLs(moduleAddress, outputName string) ([]string, bool) {
+	collect := func(mb *modulespec.ModuleBlock) ([]string, bool) {
+		mp := mb.PlannedModule()
+		if outputName != "" {
+			out, ok := mp.Outputs[outputName]
+			if !ok {
+				return nil, false
+			}
+			return append([]string(nil), out.SourceURLs...), len(out.SourceURLs) > 0
+		}
+		var all []string
+		for _, out := range mp.Outputs {
+			all = append(all, out.SourceURLs...)
+		}
+		return all, len(all) > 0
+	}
+
+	if v, ok := c.GetVertices()[moduleAddress]; ok {
+		if mb, isMod := v.(*modulespec.ModuleBlock); isMod {
+			return collect(mb)
+		}
+	}
+	if !strings.Contains(moduleAddress, "[") {
+		prefix := moduleAddress + "["
+		var urls []string
+		for _, mb := range golden.Blocks[*modulespec.ModuleBlock](c) {
+			if strings.HasPrefix(mb.Address(), prefix) {
+				if part, ok := collect(mb); ok {
+					urls = append(urls, part...)
+				}
+			}
+		}
+		if len(urls) > 0 {
+			return urls, true
+		}
+	}
+	return nil, false
+}
+
 func (c *SofaConfig) SourceBranches() []mergespec.SourceBranchInfo {
 	ctx := c.EvalContext()
 	sources := golden.Blocks[*sourcespec.SourceBlock](c)
 	out := make([]mergespec.SourceBranchInfo, 0, len(sources))
+	seen := make(map[mergespec.SourceBranchInfo]struct{}, len(sources))
+	if c.parentConfig != nil {
+		for _, info := range c.parentConfig.SourceBranches() {
+			if _, dup := seen[info]; !dup {
+				seen[info] = struct{}{}
+				out = append(out, info)
+			}
+		}
+	}
 	for _, s := range sources {
 		url, urlOK := c.evalKnownHclStringAttr(s.HclBlock(), "url", ctx, 0)
 		branch, branchOK := c.evalKnownHclStringAttr(s.HclBlock(), "branch", ctx, 0)
 		if !urlOK || !branchOK {
 			continue
 		}
-		out = append(out, mergespec.SourceBranchInfo{
+		info := mergespec.SourceBranchInfo{
 			URL:    url,
 			Branch: branch,
-		})
+		}
+		if _, dup := seen[info]; !dup {
+			seen[info] = struct{}{}
+			out = append(out, info)
+		}
 	}
 	return out
 }
@@ -331,16 +457,29 @@ func (c *SofaConfig) PreservedKnownBranches() []mergespec.PreservedBranchInfo {
 	ctx := c.EvalContext()
 	preserves := golden.Blocks[*sourcespec.PreserveBlock](c)
 	out := make([]mergespec.PreservedBranchInfo, 0, len(preserves))
+	seen := make(map[mergespec.PreservedBranchInfo]struct{}, len(preserves))
+	if c.parentConfig != nil {
+		for _, info := range c.parentConfig.PreservedKnownBranches() {
+			if _, dup := seen[info]; !dup {
+				seen[info] = struct{}{}
+				out = append(out, info)
+			}
+		}
+	}
 	for _, p := range preserves {
 		url, urlOK := c.evalKnownHclStringAttr(p.HclBlock(), "url", ctx, 0)
 		branch, branchOK := c.evalKnownHclStringAttr(p.HclBlock(), "branch", ctx, 0)
 		if !urlOK || !branchOK {
 			continue
 		}
-		out = append(out, mergespec.PreservedBranchInfo{
+		info := mergespec.PreservedBranchInfo{
 			URL:    url,
 			Branch: branch,
-		})
+		}
+		if _, dup := seen[info]; !dup {
+			seen[info] = struct{}{}
+			out = append(out, info)
+		}
 	}
 	return out
 }

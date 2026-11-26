@@ -122,7 +122,7 @@ func (b *ModelProviderBlock) Value() cty.Value {
 		return cty.DynamicVal
 	}
 	return cty.ObjectVal(map[string]cty.Value{
-		"address": cty.StringVal(b.Address()),
+		"address": cty.StringVal(b.CanonicalAddress()),
 		"kind":    cty.StringVal("model_provider"),
 		"name":    cty.StringVal(b.Name()),
 		"retry": cty.ObjectVal(map[string]cty.Value{
@@ -133,6 +133,16 @@ func (b *ModelProviderBlock) Value() cty.Value {
 			"error_message_regex":  stringListValue(b.plannedRetry.ErrorMessageRegex),
 		}),
 	})
+}
+
+// CanonicalAddress returns the module-qualified canonical address when nested in a child module.
+func (b *ModelProviderBlock) CanonicalAddress() string {
+	if b.BaseBlock != nil {
+		if provider, ok := b.Config().(interface{ CanonicalAddress(string) string }); ok {
+			return provider.CanonicalAddress(b.Address())
+		}
+	}
+	return b.Address()
 }
 
 func (b *ModelProviderBlock) APIKeyValue() cty.Value {

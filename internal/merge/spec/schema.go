@@ -25,6 +25,8 @@ type ModuleRegistry interface {
 	LookupSourceURL(name string) (string, bool)
 	SingleRootSourceURL() (string, int)
 	LookupUpstreamSourceURLs(address string) ([]string, bool)
+	LookupVariableSourceURLs(name string) ([]string, bool)
+	LookupModuleOutputSourceURLs(moduleAddress, outputName string) ([]string, bool)
 	ResolveLocalExpr(name string) (hcl.Expression, bool)
 	SourceBranches() []SourceBranchInfo
 	PreservedKnownBranches() []PreservedBranchInfo
@@ -315,6 +317,28 @@ func (m *MergeBlock) resolveSourceURL(reg ModuleRegistry) (string, error) {
 								if u != "" {
 									urls[u] = struct{}{}
 								}
+							}
+						}
+					}
+				}
+			case "var":
+				if len(traversal) >= 2 {
+					if vAttr, ok := traversal[1].(hcl.TraverseAttr); ok {
+						if varURLs, exists := reg.LookupVariableSourceURLs(vAttr.Name); exists {
+							for _, u := range varURLs {
+								if u != "" {
+									urls[u] = struct{}{}
+								}
+							}
+						}
+					}
+				}
+			case "module":
+				if addr, outputName, ok := workerspec.ParseModuleOutputTraversal(traversal); ok {
+					if modURLs, exists := reg.LookupModuleOutputSourceURLs(addr, outputName); exists {
+						for _, u := range modURLs {
+							if u != "" {
+								urls[u] = struct{}{}
 							}
 						}
 					}

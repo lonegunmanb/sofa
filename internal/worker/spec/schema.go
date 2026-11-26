@@ -37,6 +37,8 @@ type ModuleRegistry interface {
 	LookupSourceURL(name string) (string, bool)
 	SingleRootSourceURL() (string, int)
 	LookupWorkerSourceURLs(address string) ([]string, bool)
+	LookupVariableSourceURLs(name string) ([]string, bool)
+	LookupModuleOutputSourceURLs(moduleAddress, outputName string) ([]string, bool)
 	ResolveLocalExpr(name string) (hcl.Expression, bool)
 	ValidateWorkerFallbackTargets(workerAddress string, targets []string) error
 }
@@ -599,6 +601,28 @@ func (w *WorkerBlock) resolveBasedSourceURL(reg ModuleRegistry) (string, error) 
 						}
 					}
 				}
+			case "var":
+				if len(traversal) >= 2 {
+					if vAttr, ok := traversal[1].(hcl.TraverseAttr); ok {
+						if varURLs, exists := reg.LookupVariableSourceURLs(vAttr.Name); exists {
+							for _, u := range varURLs {
+								if u != "" {
+									urls[u] = struct{}{}
+								}
+							}
+						}
+					}
+				}
+			case "module":
+				if addr, outputName, ok := ParseModuleOutputTraversal(traversal); ok {
+					if modURLs, exists := reg.LookupModuleOutputSourceURLs(addr, outputName); exists {
+						for _, u := range modURLs {
+							if u != "" {
+								urls[u] = struct{}{}
+							}
+						}
+					}
+				}
 			}
 		}
 		return nil
@@ -625,6 +649,35 @@ func (w *WorkerBlock) resolveBasedSourceURL(reg ModuleRegistry) (string, error) 
 	default:
 		return "", fail("worker %q based_source does not identify a source repository and %d source blocks exist; reference source.<name>.branch or an upstream worker", w.Name(), sourceCount)
 	}
+}
+
+// ParseModuleOutputTraversal extracts the module block address (including any
+// known for_each index) and optional output name from a `module.*` traversal.
+func ParseModuleOutputTraversal(traversal hcl.Traversal) (moduleAddr, outputName string, ok bool) {
+	if len(traversal) < 2 || traversal.RootName() != "module" {
+		return "", "", false
+	}
+	mAttr, isAttr := traversal[1].(hcl.TraverseAttr)
+	if !isAttr || mAttr.Name == "" {
+		return "", "", false
+	}
+	moduleAddr = "module." + mAttr.Name
+	outputIdx := 2
+	if len(traversal) >= 3 {
+		if idx, isIdx := traversal[2].(hcl.TraverseIndex); isIdx {
+			k, _ := idx.Key.UnmarkDeep()
+			if k.IsKnown() && !k.IsNull() && (k.Type().Equals(cty.String) || k.Type().Equals(cty.Number)) {
+				moduleAddr = fmt.Sprintf("%s[%s]", moduleAddr, golden.CtyValueToString(k))
+			}
+			outputIdx = 3
+		}
+	}
+	if len(traversal) > outputIdx {
+		if outAttr, isOut := traversal[outputIdx].(hcl.TraverseAttr); isOut {
+			outputName = outAttr.Name
+		}
+	}
+	return moduleAddr, outputName, true
 }
 
 func (w *WorkerBlock) contextWithBase(base *hcl.EvalContext) *hcl.EvalContext {

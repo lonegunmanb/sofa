@@ -171,7 +171,7 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 	plannedConfig := cloneSandboxConfig(config)
 	b.plannedConfig = &plannedConfig
 	b.planned = cty.ObjectVal(map[string]cty.Value{
-		"address": cty.StringVal(b.Address()),
+		"address": cty.StringVal(b.CanonicalAddress()),
 		"kind":    cty.StringVal("sandbox"),
 		"name":    cty.StringVal(b.Name()),
 		"runtime": cty.StringVal(config.Runtime),
@@ -179,6 +179,16 @@ func (b *SandboxBlock) ExecuteDuringPlan() error {
 		"network": cty.StringVal(config.Network),
 	})
 	return nil
+}
+
+// CanonicalAddress returns the module-qualified canonical address when nested in a child module.
+func (b *SandboxBlock) CanonicalAddress() string {
+	if b.BaseBlock != nil {
+		if provider, ok := b.Config().(interface{ CanonicalAddress(string) string }); ok {
+			return provider.CanonicalAddress(b.Address())
+		}
+	}
+	return b.Address()
 }
 
 func (b *SandboxBlock) Value() cty.Value {

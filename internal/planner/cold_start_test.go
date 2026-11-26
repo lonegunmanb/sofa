@@ -302,3 +302,80 @@ output "merged" {
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
 }
+
+const coldStartModuleChildEnv = "SOFA_COLD_START_MODULE_CHILD"
+
+func TestColdStartLoadModuleBeforeNewSofaConfig(t *testing.T) {
+	if os.Getenv(coldStartModuleChildEnv) == "1" {
+		dir := os.Getenv("SOFA_COLD_START_DIR")
+		loaded, diags, err := config.LoadDirectoryContext(context.Background(), dir)
+		require.NoError(t, err)
+		require.False(t, diags.HasErrors(), diags.Error())
+		require.Len(t, loaded.Blocks, 6)
+
+		cfg := NewSofaConfig(ConfigArgs{
+			Context:   context.Background(),
+			Directory: dir,
+		})
+		require.NoError(t, cfg.Init(loaded.Blocks))
+		require.NoError(t, cfg.RunPlan())
+		require.Len(t, cfg.Outputs(), 1)
+		require.False(t, cfg.Outputs()[0].Value.IsKnown())
+		return
+	}
+
+	dir := t.TempDir()
+	childDir := filepath.Join(dir, "audit")
+	require.NoError(t, os.MkdirAll(childDir, 0o755))
+	writePlannerFile(t, filepath.Join(childDir, "audit.sofa.hcl"), `
+variable "branch" {
+  type = string
+}
+
+worker "review" {
+  based_source  = var.branch
+  model         = "test-model"
+  system_prompt = "review"
+}
+
+output "verified_branch" {
+  value = worker.review.work_branch
+}
+`)
+	writePlannerFile(t, filepath.Join(dir, "workflow.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/repo.git"
+  branch = "main"
+}
+
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+}
+
+harness "local" {}
+
+worker "specify" {
+  based_source  = source.project.branch
+  model         = "test-model"
+  system_prompt = "specify"
+}
+
+module "audit" {
+  source = "./audit"
+  branch = worker.specify.work_branch
+}
+
+output "verified" {
+  value = module.audit.verified_branch
+}
+`)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestColdStartLoadModuleBeforeNewSofaConfig$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		coldStartModuleChildEnv+"=1",
+		"SOFA_COLD_START_DIR="+dir,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}

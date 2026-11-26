@@ -39,6 +39,14 @@ func (s *stubMergeRegistry) LookupUpstreamSourceURLs(address string) ([]string, 
 	return u, ok
 }
 
+func (s *stubMergeRegistry) LookupVariableSourceURLs(name string) ([]string, bool) {
+	return nil, false
+}
+
+func (s *stubMergeRegistry) LookupModuleOutputSourceURLs(moduleAddress, outputName string) ([]string, bool) {
+	return nil, false
+}
+
 func (s *stubMergeRegistry) ResolveLocalExpr(name string) (hcl.Expression, bool) {
 	e, ok := s.locals[name]
 	return e, ok
