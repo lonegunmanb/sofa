@@ -90,7 +90,7 @@ sofa/
 
 | 编号 | 设计文档 | 核心交付物（单篇 ~250–500 行核心代码） | 前置依赖 |
 | :--- | :--- | :--- | :--- |
-| **010** | [010-schema-mount-alignment.md](./010-schema-mount-alignment.md) | 移除 `sandbox.entrypoint`，将 `${artifact(...).path}` 与 `${import_artifact.<name>.path}` 统一对齐至 `/.sofa/artifacts/...` 与 `/.sofa/imports/...` | Stage 1 (`009`) |
+| **010** | [010-schema-mount-alignment.md](./010-schema-mount-alignment.md) | 移除 `sandbox.entrypoint`、支持 `qc` 独立覆盖 `sandbox`/`profile`、对齐 `/.sofa/{artifacts,imports}/...` 路径 | Stage 1 (`009`) |
 | **011** | [011-blobstore-and-artifacts.md](./011-blobstore-and-artifacts.md) | `internal/blob` 流式 `Store` + `LocalStore`，`internal/artifact` 产出校验、上传缓存、检查点非 Git 快照与 `import_artifact` 解压 | 010 |
 | **012** | [012-git-ledger-and-adapter.md](./012-git-ledger-and-adapter.md) | `internal/git` 受管分支登记/清理纯领域账本 + 宿主机 `git` CLI 适配层（`--single-branch` 独立工作区、内存凭据、`writable_paths` Diff 与回滚、`rebase` 检测） | 010 |
 | **013** | [013-plugin-cache-and-sandbox.md](./013-plugin-cache-and-sandbox.md) | `internal/harness/installer` 插件发现与锁校验缓存 + `internal/sandbox/runtime` Podman 挂载隔离、`podman exec -i` 与 `gatekeeper` 容器执行器 | 010, 011, 012 |

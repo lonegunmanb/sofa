@@ -59,10 +59,9 @@ preserve "final_implementation" {
 
 ```hcl
 sandbox "go_env" {
-  runtime    = "podman" # "podman" | "docker" | "nerdctl" | "kirk"
-  image      = "ghcr.io/lonegunmanb/sofa-go:1.27"
-  entrypoint = null
-  network    = "bridge" # 默认 "bridge"；可配置 "bridge" | "none" | "host"
+  runtime = "podman" # "podman" | "docker" | "nerdctl" | "kirk"
+  image   = "ghcr.io/lonegunmanb/sofa-go:1.27"
+  network = "bridge" # 默认 "bridge"；可配置 "bridge" | "none" | "host"
 
   mount {
     source    = "/var/cache/sofa/gomod"
@@ -137,12 +136,12 @@ worker "implement" {
   import_artifact "design" {
     desc    = "上游获批的技术设计方案"
     sources = [worker.plan.artifact.design]
-    path    = ".sofa/imports/design.md" # 可选：消费方工作区内只读相对路径
+    path    = "design.md" # 可选：挂载于 /.sofa/imports/design.md（${import_artifact.design.path} 返回该容器内绝对路径）
   }
 
   artifact "test_report" {
     type        = "file"
-    path        = "reports/test-summary.json"
+    path        = "reports/test-summary.json" # 挂载于 /.sofa/artifacts/reports/test-summary.json
     description = "测试摘要"
     required    = true
     non_empty   = true
@@ -157,10 +156,13 @@ worker "implement" {
     require_clean_worktree = true
   }
 
-  # 独立容器 QC Session（默认继承所属 worker 的 harness / model_provider / model / sandbox，可单独覆盖 harness 实现异构互审）
+  # 独立容器 QC Session（默认继承所属 worker 的 sandbox / harness / model_provider / model / profile，可独立覆盖任一维度）
   qc {
+    sandbox          = null # 可选：覆盖为如 sandbox.sec_audit 换用专用审计镜像（仍只读挂载同一冻结 /workspace）
     harness          = null # 可选：覆盖为如 harness.antigravity 做跨模型/跨 Harness 独立质检
+    model_provider   = null # 可选：显式写 null 可豁免继承父 worker 的 model_provider
     model            = "claude-opus-4-6"
+    profile          = null
     reasoning_effort = "high"
     max_qc_rounds    = 3
 

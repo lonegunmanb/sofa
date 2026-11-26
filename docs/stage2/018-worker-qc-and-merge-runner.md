@@ -46,8 +46,8 @@
      - 若配置了 `gatekeepers`，调用 `013` 的 `sandboxEngine.RunGatekeepers`；
      - 若失败：若 `gatekeeperAttempts < maxGatekeeperReworks`（默认复用 `max_qc_rounds` 或固定上限 `3`），将失败命令、退出码与 `stdout/stderr` 格式化为返工提示回到 **2a**；超限则检查是否声明了匹配 `"gatekeeper_exhausted"` 的 `fallback`（有则返回 `FallbackTriggered`，无则返回 `Failed`）。
    - **2d. 执行独立只读容器 `QC` 会话**：
-     - 若配置了 `qc` 块：解析有效配置（未显式覆盖的 `harness` / `model_provider` / `model` 默认继承所属 `worker`，支持异构覆盖！）；
-     - 挂载同一份 `workspace/`（**强制 `:ro`**）、`artifacts/`（**强制 `:ro`**）与 `imports/`（`:ro`）启动独立 `QC` 容器，运行 `016` 的 `RunQCPhase`（传入宿主机持有的跨轮次 `QCLedger`）；
+     - 若配置了 `qc` 块：解析有效配置（未显式覆盖的 `sandbox` / `harness` / `model_provider` / `model` / `profile` 默认继承所属 `worker`，支持单独覆盖任意维度实现异构审计镜像与异构模型互审！）；
+     - 使用有效 `qc.sandbox` 配置，挂载同一份 `workspace/`（**强制 `:ro`**）、`artifacts/`（**强制 `:ro`**）与 `imports/`（`:ro`）启动全新独立 `QC` 容器实例，运行 `016` 的 `RunQCPhase`（传入宿主机持有的跨轮次 `QCLedger`）；
      - 若裁决为 `revise`：若 `qcRound < qc.MaxQCRounds`，带着当前未决 `QC-xxx` 问题详情回到 **2a** 让 Work 返工；若已达 `MaxQCRounds`，检查是否声明了 `"qc_exhausted"` `fallback`（有则返回 `FallbackTriggered`，无则返回 `Failed`）。
 3. **步骤 3：最终检查点、`human_approval` 版本绑定与正式发布**：
    - 调用 `ckptMgr.SaveCheckpoint` 将通过全部门禁的最终代码与产物落成完整检查点，得到最终 `finalCommitSHA`；

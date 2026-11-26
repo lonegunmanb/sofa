@@ -1,10 +1,11 @@
-# 分片 010：跨阶段契约收口——禁用 `sandbox.entrypoint` 与容器外 `/.sofa/{artifacts,imports}` 路径对齐
+# 分片 010：跨阶段契约收口——禁用 `sandbox.entrypoint`、`qc` 独立 `sandbox`/`profile` 覆盖与容器外 `/.sofa/{artifacts,imports}` 路径对齐
 
 ## 1. 目标与边界
 
-在编写阶段二运行期代码前，把 `/grill-me` 敲定的两项 HCL 语义修正干净收口，避免阶段一导出的 `Plan` 与阶段二容器挂载契约脱节：
+在编写阶段二运行期代码前，把 `/grill-me` 敲定的三项 HCL 语义修正干净收口，避免阶段一导出的 `Plan` 与阶段二容器挂载契约脱节：
 1. **禁用 `sandbox.entrypoint`**：从 `sandbox` 块删除 `entrypoint` 属性支持（用户写 `entrypoint` 时按未知属性直接报错），确保容器主进程入口 100% 由 `sofa` 托管（防止自定义入口向 `stdout` 输出内容破坏 `go-plugin` 首行握手）。
-2. **`artifact` 与 `import_artifact` 容器外绝对路径对齐**：将 `${artifact("<name>").path}`（含 `worker.<w>.artifact.<name>.path`）统一改为返回 `"/.sofa/artifacts/<rel_path>"`，将 `${import_artifact.<name>.path}` 统一改为返回 `"/.sofa/imports/<rel_path_or_name>"`，使 `/workspace` 保持 100% 纯净的 Git 工作树。
+2. **`qc` 支持可选覆盖独立 `sandbox`（及 `profile`）**：允许 `worker` 内的 `qc` 嵌套块显式配置 `sandbox = sandbox.<name>` 与 `profile`（省略或为 `null` 时默认继承所属 `worker` 的 `sandbox` / `profile`），使 `(sandbox, harness, model_provider, model/profile)` 四个维度在 `qc` 上完全正交支持异构审计容器。
+3. **`artifact` 与 `import_artifact` 容器外绝对路径对齐**：将 `${artifact("<name>").path}`（含 `worker.<w>.artifact.<name>.path`）统一改为返回 `"/.sofa/artifacts/<rel_path>"`，将 `${import_artifact.<name>.path}` 统一改为返回 `"/.sofa/imports/<rel_path_or_name>"`，使 `/workspace` 保持 100% 纯净的 Git 工作树。
 
 **前置依赖**：阶段一 `009`。
 **本分片不做**：任何容器启动、`BlobStore` 读写或磁盘挂载（仅纯离线 Schema / Planner / Export / 测试对齐，100% Tier 1 单测）。
@@ -14,9 +15,9 @@
 ## 2. 涉及包与文件清单
 
 - 修改 `internal/sandbox/spec/schema.go` 及 `schema_test.go`
-- 修改 `internal/worker/spec/artifact.go`、`schema.go` 及 `schema_test.go`
-- 修改 `internal/planner/export.go` 及 `internal/planner/*_test.go`（适配移除 `entrypoint` 与新路径）
-- 同步修订 `docs/hcl-contract.md` 中 `sandbox`、`artifact` 与 `import_artifact` 示例说明
+- 修改 `internal/worker/spec/qc.go`、`artifact.go`、`schema.go` 及 `schema_test.go`
+- 修改 `internal/planner/export.go` 及 `internal/planner/*_test.go`（适配移除 `entrypoint`、`qc.sandbox`/`qc.profile` 导出与新产物路径）
+- 同步修订 `docs/hcl-contract.md` 中 `sandbox`、`qc`、`artifact` 与 `import_artifact` 示例说明
 
 ---
 
@@ -31,7 +32,17 @@
 2. 在 `internal/planner/export.go` 的 `encodeSandboxConfig` 中：
    - 从导出的 `cty.ObjectVal` 删除 `"entrypoint": stringListVal(cfg.Entrypoint)`。
 
-### 3.2 `artifact` 与 `import_artifact` 容器绝对路径映射（`internal/worker/spec/artifact.go`）
+### 3.2 `qc` 块支持独立覆盖 `sandbox` 与 `profile`（`internal/worker/spec/qc.go` & `internal/planner/export.go`）
+1. 在 `internal/worker/spec/qc.go` 中：
+   - 在 `qcAllowedAttrs` 新增 `"sandbox": {}` 与 `"profile": {}`；
+   - 在 `QCConfig` 结构体新增 `Sandbox cty.Value`（默认 `cty.NullVal(cty.EmptyObject)`，代表继承所属 `worker.Sandbox`）与 `Profile string`；
+   - 在 `decodeQC` 中：
+     - 解析可选 `sandbox` 属性（逻辑与 `qc.harness` 完全一致：若提供且非 `null`，调用 `validateBlockReference(val, "sandbox", "qc sandbox")` 校验引用了合法 `sandbox.<name>` 并存入 `result.Sandbox`；注意 `golden` 扫描块内遍历表达式时会自动建立 `worker -> sandbox.<qc_sandbox>` 的 DAG 依赖边，同时确保 `dynamic_worker` 虚拟 worker 校验同样生效）；
+     - 解析可选 `profile` 属性（非空白已知字符串，与 `qc.model` 一致）。
+2. 在 `internal/planner/export.go` 的 `encodeWorkerConfig`（`qcVal` 编码处）中：
+   - 新增 `"sandbox": qcSandbox`（`cty.NilVal` 归一化为 `cty.NullVal(cty.EmptyObject)`）与 `"profile": cty.StringVal(cfg.QC.Profile)`。
+
+### 3.3 `artifact` 与 `import_artifact` 容器绝对路径映射（`internal/worker/spec/artifact.go`）
 1. 定义两个导出路径前缀常量：
    ```go
    const (
@@ -74,3 +85,6 @@
    - 在 HCL 中直接给 `artifact.path` 写绝对路径 `"/etc/passwd"` 或 `"../escape"` 时，依然在 Plan 期报错拦截。
 3. **同名 `artifact` 与 `import_artifact` 互不冲突**：
    - 同一 `worker` 同时声明 `import_artifact "doc" { path = "spec.md"; sources = [...] }` 与 `artifact "out" { type = "file"; path = "spec.md"; description = "Out" }` 时合法通过（一个在 `/.sofa/imports/spec.md`，一个在 `/.sofa/artifacts/spec.md`）；但两个 `artifact` 同指 `"spec.md"`（或 `"dir"` 与 `"dir/a.txt"`）依然报错。
+4. **`qc` 独立覆盖 `sandbox` 与 `profile`**：
+   - `qc` 省略 `sandbox`（或写 `sandbox = null`）时导出为 `null`（运行期继承 `worker.sandbox`）；
+   - `qc { sandbox = sandbox.sec_audit; profile = "opus-audit"; criteria = { ... } }` 通过 Plan、自动建立对 `sandbox.sec_audit` 的 DAG 依赖边，且 `ExportPlan` 完整保留 `qc.sandbox` 与 `qc.profile`；误传非 `sandbox` 块引用（如 `sandbox = harness.copilot`）在 Plan 期报错。
