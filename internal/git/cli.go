@@ -403,6 +403,22 @@ func (a *CLIAdapter) PrepareWorkspace(ctx context.Context, repoURL, fetchBranch,
 	return nil
 }
 
+// HeadSHA resolves and validates the 40-character lowercase hex HEAD commit SHA of workspaceDir.
+func (a *CLIAdapter) HeadSHA(ctx context.Context, workspaceDir string) (string, error) {
+	if strings.TrimSpace(workspaceDir) == "" {
+		return "", errors.New("workspace directory is required")
+	}
+	stdout, _, _, err := a.runGit(ctx, workspaceDir, nil, nil, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.ToLower(strings.TrimSpace(stdout))
+	if !IsValidCommitSHA(sha) {
+		return "", fmt.Errorf("unexpected HEAD sha %q", strings.TrimSpace(stdout))
+	}
+	return sha, nil
+}
+
 // StatusPaths inspects workspaceDir using NUL-delimited porcelain status output.
 func (a *CLIAdapter) StatusPaths(ctx context.Context, workspaceDir string) ([]ChangedPath, error) {
 	if strings.TrimSpace(workspaceDir) == "" {

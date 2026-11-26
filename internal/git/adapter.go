@@ -21,6 +21,7 @@ type RebaseOutcome struct {
 type Adapter interface {
 	ResolveBranchSHA(ctx context.Context, repoURL, branch string, auth AuthConfig) (string, error)
 	PrepareWorkspace(ctx context.Context, repoURL, fetchBranch, pinSHA, destDir string, auth AuthConfig) error
+	HeadSHA(ctx context.Context, workspaceDir string) (string, error)
 	StatusPaths(ctx context.Context, workspaceDir string) ([]ChangedPath, error)
 	RevertPaths(ctx context.Context, workspaceDir string, paths []string) error
 	CommitAllAndPush(ctx context.Context, workspaceDir, repoURL, remoteBranch, message string, auth AuthConfig) (newSHA string, committed bool, err error)

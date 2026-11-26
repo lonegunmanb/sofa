@@ -81,6 +81,10 @@ func TestCLIAdapterWorkspaceRevertPushContainsAndDeleteIntegration(t *testing.T)
 	wsDir := filepath.Join(t.TempDir(), "workspace")
 	require.NoError(t, adapter.PrepareWorkspace(ctx, bareDir, "main", baseSHA, wsDir, AuthConfig{}))
 
+	headSHA0, err := adapter.HeadSHA(ctx, wsDir)
+	require.NoError(t, err)
+	require.Equal(t, baseSHA, headSHA0)
+
 	// .git/config must contain zero remote URLs or credentials.
 	gitConfigBytes, err := os.ReadFile(filepath.Join(wsDir, ".git", "config"))
 	require.NoError(t, err)
