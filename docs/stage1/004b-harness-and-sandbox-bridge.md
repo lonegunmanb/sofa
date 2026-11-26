@@ -2,11 +2,11 @@
 
 ## 1. 目标与边界
 
-为支持多语言 Agent Harness（如内置 Go `copilot`、Python `google-antigravity`、未来其他 SDK）通过 `hashicorp/go-plugin`（gRPC）统一接入，并与 `model_provider`、`sandbox` 保持**完全正交**，本分片在进入 `005`（`worker`）前完成三项离线配置层准备：
+为支持多语言 Agent Harness（如 Go `sofa-harness-copilot`、Python `sofa-harness-antigravity`、未来其他 SDK）通过 `hashicorp/go-plugin`（gRPC）统一作为独立外部插件接入，**不保留任何内置（bundled）特例**，并与 `model_provider`、`sandbox` 保持**完全正交**，本分片在进入 `005`（`worker`）前完成三项离线配置层准备：
 
 1. **调整 `sandbox.network` 默认值**：从 `"none"` 调整为 **`"bridge"`**（仍支持显式配置 `"bridge"` | `"none"` | `"host"`），以便容器内运行的 Agent Harness 插件默认可访问外部模型服务；
-2. **新增顶层 `harness "<name>"` 块**（声明方式对齐 `github.com/terraform-linters/tflint` 的 `plugin` 块）：支持内置（bundled `"copilot"`）、GitHub Releases（`source` + `version` + `signature` + `signing_key`）与本地手动安装三种模式，**严禁内嵌 `model_provider`** 以保持正交；
-3. **扩展 `RootDefaults`**：新增 `Harnesses []string` 与 `ResolveDefaultHarness(consumerAddr string) (*string, error)`（`0` 个回退内置 `"copilot"`，`1` 个作为全局默认，`>=2` 个报歧义错误）。
+2. **新增顶层 `harness "<name>"` 块**（声明方式对齐 `github.com/terraform-linters/tflint` 的外部 `plugin` 块）：仅支持 **GitHub Releases（`source` + `version` + `signature` + `signing_key`）** 与 **本地插件目录（省略 `source` 与 `version`）** 两种纯粹外部模式，无任何 `"copilot"` 硬编码特例，且**严禁内嵌 `model_provider`** 以保持正交；
+3. **扩展 `RootDefaults`**：新增 `Harnesses []string` 与 `ResolveDefaultHarness(consumerAddr string) (string, error)`，规则与 `ResolveDefaultSandbox` 完全一致（`0` 个报错，`1` 个作为全局默认，`>=2` 个报歧义错误）。
 
 **前置依赖**：分片 `003`、`004`（与 `004` 无代码耦合，可在 `004` 前或后紧接执行，必须在 `005` 之前完成）。
 **本分片不做**：真实网络请求 GitHub Releases API（留给 `007` 的 `sofa init`）或启动 `go-plugin` 进程（留给 Stage 2 运行时）。
@@ -57,15 +57,15 @@ harness "antigravity" {
 - **与 `model_provider` 的正交铁律**：
   - `harness` 块**不支持也不允许声明 `model_provider` 属性**（写 `model_provider` 按未知属性报错）。`harness` 与 `model_provider` 在 `worker` / `qc` 上独立组合。
 - **字段校验细则（`HarnessConfig.Validate()`）**：
-  1. **`source` 与 `version` 成对约束（对齐 `tflint` 三模式）**：
-     - 两者均省略（或均为 `null`）：合法！若 `b.Name() == "copilot"` 则代表使用内置（bundled）Copilot Harness（若本地插件目录存在手动安装的 `sofa-harness-copilot` 则运行期本地优先）；若为其他名称则代表本地手动安装模式（运行期查找 `<plugin_dir>/sofa-harness-<name>`）。
+  1. **`source` 与 `version` 成对约束（仅两种外部模式，零内置特例）**：
+     - 两者均省略（或均为 `null`）：合法！对**任意名称 `<name>` 一视同仁**代表本地插件目录模式（运行期在 `<plugin_dir>` 查找 `sofa-harness-<name>`，绝不对 `"copilot"` 做任何特殊分支处理）。
      - 仅设置其中一个而省略另一个：直接 Plan 报错（`source and version must be set together or omitted together`）。
      - 两者均设置时：
-       - `source` 必须符合 `<host>/<owner>/<repo>` 三段非空格式（如 `github.com/org/sofa-harness-foo` 或私有 GHES `ghe.example.com/org/repo`；禁止协议头 `https://`、禁止空白字符、禁止 `..` 或路径后缀 `.git`）；解析保存 `SourceHost`、`SourceOwner`、`SourceRepo`。
+       - `source` 必须符合 `<host>/<owner>/<repo>` 三段非空格式（如 `github.com/lonegunmanb/sofa-harness-copilot`、`github.com/lonegunmanb/sofa-harness-antigravity` 或私有 GHES `ghe.example.com/org/repo`；禁止协议头 `https://`、禁止空白字符、禁止 `..` 或路径后缀 `.git`）；解析保存 `SourceHost`、`SourceOwner`、`SourceRepo`。
        - `version` 必须为精确语义化版本号（如 `"0.1.0"`、`"1.2.3-rc.1"`），**严禁以 `"v"` 开头**（提示去掉前导 `"v"`，GitHub Release Tag 会自动拼为 `v{version}`），严禁包含版本范围操作符（`>=`、`~>`、`*` 等）。
   2. **`signature` 与 `signing_key`（对齐 `tflint`）**：
      - `signature`（可选 `string`，省略或 `null` 时默认 `"auto"`）：仅允许 `"auto"` | `"attestation"` | `"pgp"` | `"none"`。
-     - 当 `signature == "pgp"` 时，`signing_key` 必须为非空字符串；当 `source` 省略（手动/内置模式）时，若显式设置了非默认 `signature` 或 `signing_key` 则报错（无远端下载无需验签）。
+     - 当 `signature == "pgp"` 时，`signing_key` 必须为非空字符串；当 `source` 省略（本地插件目录模式）时，若显式设置了非默认 `signature` 或 `signing_key` 则报错（无远端下载无需验签）。
   3. **`env_refs`（可选 `map(string)`）**：
      - Plan 期必须完全已知（`IsWhollyKnown()`），拒绝 `null` 元素；键和值都必须是合法的环境变量名（匹配 `^[A-Za-z_][A-Za-z0-9_]*$`）；Plan 期**绝不读取宿主机环境变量值**。
   4. **`options`（可选任意已知结构化 `cty.Value`）**：
@@ -78,7 +78,6 @@ harness "antigravity" {
         "address": cty.StringVal(b.Address()), // "harness.<name>"
         "kind":    cty.StringVal("harness"),
         "name":    cty.StringVal(b.Name()),
-        "bundled": cty.BoolVal(cfg.IsBundled()), // source=="" && name=="copilot"
         "source":  optionalStringVal(cfg.Source),
         "version": optionalStringVal(cfg.Version),
     })
@@ -90,9 +89,9 @@ harness "antigravity" {
 
 在 `RootDefaults` 结构体中新增 `Harnesses []string`：
 - `InspectRootDefaults(blocks)` 同步收集顶层 `block.Type == "harness"` 的名称列表；
-- 新增 `ResolveDefaultHarness(consumerAddr string) (*string, error)`：
-  - `0` 个 `harness`：返回 `(nil, nil)`（代表使用内置默认 `"copilot"` Harness）；
-  - `1` 个 `harness`：返回 `(&d.Harnesses[0], nil)`；
+- 新增 `ResolveDefaultHarness(consumerAddr string) (string, error)`（与 `ResolveDefaultSandbox` 语义完全对齐）：
+  - `0` 个 `harness`：返回错误（提示在配置中声明唯一的默认 `harness` 块或显式指定）；
+  - `1` 个 `harness`：返回 `(d.Harnesses[0], nil)`；
   - `>= 2` 个 `harness`：返回歧义错误（列出所有候选 `harness` 名称，提示显式设置 `harness = harness.<name>`）。
 
 ---
@@ -100,10 +99,10 @@ harness "antigravity" {
 ## 4. 必测 TDD Red → Green 用例清单
 
 1. **`sandbox` 默认网络变更**：省略 `network` 及显式 `network = null` 时，`sandbox.<name>.network` 与 `SandboxConfig().Network` 均为 `"bridge"`；显式 `network = "none"` 仍正常生效。
-2. **`harness` 三种声明模式与负向校验**：
-   - 无 `source`/`version` 的 `harness "copilot" {}`（`bundled == true`）与 `harness "custom" {}`（`bundled == false`，手动模式）均通过 Plan；
+2. **`harness` 两种外部模式与负向校验（零特例）**：
+   - 无 `source`/`version` 的本地插件声明（如 `harness "copilot" {}`、`harness "custom" {}`）行为完全一致，均通过 Plan 且无任何特权差异；
    - 带合法 `source = "github.com/org/sofa-harness-agy"` + `version = "0.1.0"` 通过 Plan；
    - 只写 `source` 不写 `version`（或反之）报错；`version = "v0.1.0"`（带 `v` 前缀）或 `version = ">= 0.1.0"` 报错；`source = "https://github.com/..."` 报错；
    - `signature = "pgp"` 未配 `signing_key` 报错；非法 `env_refs` 变量名报错；`options` 含未知值报错、含敏感值时保留 `SensitiveMark`；
    - 在 `harness` 内误写 `model_provider` 时按未知属性报错。
-3. **`RootDefaults.ResolveDefaultHarness` 矩阵**：完整覆盖 `0`（返回 `nil`）、`1`（返回唯一名称）、`2`（返回含候选名的歧义错误）三种情况。
+3. **`RootDefaults.ResolveDefaultHarness` 矩阵**：完整覆盖 `0`（返回缺失错误）、`1`（返回唯一名称）、`2`（返回含候选名的歧义错误）三种情况。

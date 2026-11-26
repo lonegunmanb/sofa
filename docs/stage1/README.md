@@ -12,7 +12,7 @@
   - 不启动任何容器（无 Podman/Docker 调用）；
   - 不启动或连接 `daprd` / Dapr Actor；
   - 不执行真实的 `git clone` / `git checkout` / `git push`；
-  - 不调用 `copilot-sdk/go` 发起任何模型会话；
+  - 不拉起任何 `go-plugin` Harness 进程或发起模型会话；
   - 所有测试均为 **Tier 1 纯本地快速单元测试**（`go test ./... -count=1` 必须在无网络、无守护进程环境下毫秒～秒级全绿）。
 
 ---
@@ -70,7 +70,7 @@ sofa/
 
 ### 铁律 3：单标签块（`Type() == ""`）的 `SingleValueBlock` vs `Valuable` 选型规则
 - 在 `sofa` 中，所有顶层业务块在 HCL 中都是 **1 个标签**（如 `source "project"`、`worker "specify"`），因此它们的 `Type()` 方法必须返回 `""`，`AddressLength()` 必须返回 `2`（`golden.AsHclBlocks` 会自动为其补齐前置空标签 `Labels = ["", name]`）。
-- **按单实例对象暴露的 1 标签块**（`output`、`source`、`preserve`、`sandbox`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`dynamic_worker`、`merge`、`module`）：实现 `golden.SingleValueBlock`（`Value() cty.Value`），`golden` 会自动把它们放到 `EvalContext.Variables[blockType][name]`（注意：保持与 `r42` 一致，元语法交由 `golden` 默认处理，**不要手写拦截 `for_each` 的代码**）。
+- **按单实例对象暴露的 1 标签块**（`output`、`source`、`preserve`、`sandbox`、`harness`、`model_provider`、`mcp_server`、`go_tool`、`external_tool`、`dynamic_worker`、`merge`、`module`）：实现 `golden.SingleValueBlock`（`Value() cty.Value`），`golden` 会自动把它们放到 `EvalContext.Variables[blockType][name]`（注意：保持与 `r42` 一致，元语法交由 `golden` 默认处理，**不要手写拦截 `for_each` 的代码**）。
 - **需要按多实例映射暴露 `for_each` 的 1 标签块**（`worker "<name>"`）：**不能**实现 `SingleValueBlock`，必须实现 `golden.Valuable`（`Values() map[string]cty.Value`）。此时 `golden` 内部会多包一层空子类型键 `""`（变成 `Variables["worker"].GetAttr("")`）！因此**必须在 `SofaConfig.EvalContext()` 中解包**：
   ```go
   if v, ok := ctx.Variables["worker"]; ok && !v.IsNull() && v.Type().IsObjectType() && v.Type().HasAttribute("") {
@@ -89,8 +89,8 @@ sofa/
 
 ### 铁律 6：Root 单例默认（0/1/≥2）通过 AST 预注入实现 `golden` 自动建边
 - `golden.BaseConfig` 内部的 `*Dag` 与 `addEdge` 是未导出私有成员，外部包无法在 `InitConfig` 后手工塞边。
-- 因此 Root Module 单例默认（`sandbox`、`model_provider` 以及唯一 `source` 下的 `preserve.url`）统一在 **`LoadDirectory` 之后、`golden.InitConfig` 之前** 对未显式填写该属性的块注入合成遍历属性（如注入 `sandbox = sandbox.<only_name>` 的 `hclsyntax` + `hclwrite` 属性）：
-  - `0` 个时：若必填（如 `sandbox`、`preserve.url` 无 `source`）直接返回清晰的阶段错误；
+- 因此 Root Module 单例默认（`sandbox`、`harness`、`model_provider` 以及唯一 `source` 下的 `preserve.url`）统一在 **`LoadDirectory` 之后、`golden.InitConfig` 之前** 对未显式填写该属性的块注入合成遍历属性（如注入 `sandbox = sandbox.<only_name>`、`harness = harness.<only_name>` 的 `hclsyntax` + `hclwrite` 属性）：
+  - `0` 个时：若必填（如 `sandbox`、`harness`、`preserve.url` 无 `source`）直接返回清晰的阶段错误；
   - `1` 个时：注入引用表达式，`golden` 的 `dagWalker` 会**自动建立隐式依赖边**并完成求值；
   - `≥ 2` 个时：直接返回歧义错误，要求用户显式书写。
 

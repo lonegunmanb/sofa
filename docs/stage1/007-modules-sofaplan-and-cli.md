@@ -49,7 +49,7 @@
      - 先扫描子模块自身的 `loaded.Blocks`：
        - 若子模块自身声明了 `>= 1` 个该类块（`sandbox` / `harness` / `model_provider`），子模块内部按自己的 `InspectRootDefaults` 规则走；
        - 若子模块自身声明了 **`0` 个**该类块，则**自动继承 Root Module 解析出的唯一默认 `sandbox`、`harness` 或 `model_provider` 描述符**！
-       - 若子模块自身声明了 `0` 个 `sandbox`，而 Root Module 声明了 `0` 个或 `>= 2` 个 `sandbox`（存在歧义），且子模块的 `worker` 未获得显式 `sandbox` 引用，则返回清晰的跨模块错误：`module "<addr>" worker "<w>" has no sandbox: declare a sandbox in the module or leave a single default sandbox in the root module`（同理，若 Root Module 存在 `>= 2` 个 `harness` 或 `model_provider` 且子模块 `worker` 未显式指定或置 `null`，返回清晰的跨模块歧义错误）。
+       - 若子模块自身声明了 `0` 个 `sandbox`（或 `0` 个 `harness`），而 Root Module 声明了 `0` 个或 `>= 2` 个对应块，且子模块的 `worker` 未获得显式引用，则返回清晰的跨模块错误（例如 `module "<addr>" worker "<w>" has no harness: declare a harness in the module or leave a single default harness in the root module`；同理，若 Root Module 存在 `>= 2` 个 `model_provider` 且子模块 `worker` 未显式指定或置 `null`，返回清晰的跨模块歧义错误）。
 
 3. **路径重定位（适配跨机器 `.sofaplan` 分发！）**：
    - 在 `sofa init` 后，根模块位于 `<state_dir>/config`，子模块位于 `<state_dir>/modules/<a>/<b>`。

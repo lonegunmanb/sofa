@@ -12,7 +12,7 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)
 
-- **Investigate Before Deciding**: Never propose or freeze a feature slice or task on guesswork. Always inspect the actual source code and behavior of upstream libraries (`golden`, `copilot-sdk/go`, `dapr/go-sdk`), reference implementations (`r42`), and the existing repository *before* scoping a spec or writing a plan, so existing library capabilities are leveraged directly instead of re-invented.
+- **Investigate Before Deciding**: Never propose or freeze a feature slice or task on guesswork. Always inspect the actual source code and behavior of upstream libraries (`golden`, `hashicorp/go-plugin`, `dapr/go-sdk`), reference implementations (`r42`), and the existing repository *before* scoping a spec or writing a plan, so existing library capabilities are leveraged directly instead of re-invented.
 - **Reject Oversized Tasks**: Refuse monolithic specs, plans, or tasks that bundle multiple subsystems, multiple unrelated HCL block families, or broad cross-cutting features into a single unit. If a requested or drafted scope is too big, stop, push back with concrete evidence from your investigation, and split it into minimal, single-purpose, independently testable slices before invoking `/speckit-specify` or writing code.
 
 ## 3. Spec-Driven Development (GitHub Spec Kit)
@@ -43,7 +43,7 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 
 ## 5. Tech Stack & Codebase Conventions
 
-- **Backend**: Go (`go.mod` module `github.com/lonegunmanb/sofa`), `hashicorp/hcl/v2`, `github.com/lonegunmanb/golden` (HCL → DAG planning & execution engine), `github.com/hashicorp/go-plugin` (gRPC multi-language Agent Harness plugin boundary inside containers, with `github.com/github/copilot-sdk/go` bundled as the default `"copilot"` harness and `tflint`-style external harness installation for Python `google-antigravity` etc.), and `dapr/go-sdk`.
+- **Backend**: Go (`go.mod` module `github.com/lonegunmanb/sofa`), `hashicorp/hcl/v2`, `github.com/lonegunmanb/golden` (HCL → DAG planning & execution engine), `github.com/hashicorp/go-plugin` (gRPC multi-language Agent Harness plugin boundary inside containers with zero built-in harness special cases—all harnesses such as `sofa-harness-copilot` and Python `sofa-harness-antigravity` live in independent repositories and are installed via `tflint`-style GitHub Release `source` + `version` + checksums/attestations or local plugin directories), and `dapr/go-sdk`.
   - **NEVER Re-Implement `golden` Capabilities (NON-NEGOTIABLE — Requires Explicit User Approval)**: Any capability already provided by `golden` MUST be used directly and MUST NEVER be re-implemented, duplicated, or manually intercepted/disabled without explicit prior approval from the user. This includes:
     - HCL block registration, `gohcl` struct decoding, and unknown attribute/block rejection (`golden.RegisterBlock`, `golden.Decode`);
     - Native `variable` (precedence, `SOFA_VAR_*`, `.sofavars`, type conversion, `validation`) and `locals` evaluation;

@@ -45,9 +45,9 @@
 
 ### 3.3 Root 单例默认注入（`sandbox` / `harness` / `model_provider` 三者正交）
 - 在 `InitConfig` 前扫描所有 `worker` 块（三类基础设施块完全正交，互不绑定）：
-  - **显式置空免注入原则**：只要用户在该 `worker` 块源码中**已经写出了该属性名**（包括显式写 `harness = null` 或 `model_provider = null`），即视为用户已显式表态，**绝不执行 AST 默认注入**（例如 Root 定义了唯一 OpenAI `model_provider`，但某 `worker` 显式写 `harness = harness.antigravity` + `model_provider = null` 以使用 `antigravity` 自身的 `GEMINI_API_KEY`，不会被强塞 OpenAI 提供方；而 `sandbox = null` 则会在 `WorkerBlock` 自身校验阶段因缺少必填沙箱而报错）。
+  - **显式声明免注入原则**：只要用户在该 `worker` 块源码中**已经写出了该属性名**（包括显式写 `model_provider = null`），即视为用户已显式表态，**绝不执行 AST 默认注入**（例如 Root 定义了唯一 OpenAI `model_provider`，但某 `worker` 显式写 `harness = harness.antigravity` + `model_provider = null` 以使用 `antigravity` 自身的 `GEMINI_API_KEY`，不会被强塞 OpenAI 提供方；而 `sandbox = null` 或 `harness = null` 则会在 `WorkerBlock` 自身校验阶段因缺少必填沙箱/Harness 而报错）。
   - 若**未声明** `sandbox` 属性 → 调用 `RootDefaults.ResolveDefaultSandbox(addr)`：0 个或 ≥2 个直接返回错误；唯一 1 个则向该 `HclBlock` 注入 `sandbox = sandbox.<only>` 属性遍历。
-  - 若**未声明** `harness` 属性 → 调用 `RootDefaults.ResolveDefaultHarness(addr)`：≥2 个直接返回歧义错误；唯一 1 个则注入 `harness = harness.<only>` 属性遍历；0 个保持不注入（回退内置默认 `"copilot"` Harness）。
+  - 若**未声明** `harness` 属性 → 调用 `RootDefaults.ResolveDefaultHarness(addr)`：0 个或 ≥2 个直接返回错误；唯一 1 个则向该 `HclBlock` 注入 `harness = harness.<only>` 属性遍历。
   - 若**未声明** `model_provider` 属性 → 调用 `RootDefaults.ResolveDefaultModelProvider(addr)`：≥2 个直接返回歧义错误；唯一 1 个则注入 `model_provider = model_provider.<only>` 属性遍历；0 个保持不注入（回退所选 `harness` 的原生默认提供方）。
 
 ### 3.4 未知上游值（Deferred Expression）处理
@@ -65,7 +65,7 @@
 1. **核心属性**：
    - `based_source`（必填）：类型必须为 `string`（已知非空合法分支名，或来自上游 `source`/`worker`/`merge` 的未知 `string`）；同时推导并记录其所属 `source` 仓库地址（若遍历根为 `source.<s_name>` 则取其 URL；若为上游 `worker.<w_name>` 则继承上游推导出的仓库 URL；若来自 `var` 且 Root 仅有 1 个 `source` 则绑定该唯一 `source`）。
    - `sandbox`（必填，或由 Root 唯一 `sandbox` 自动注入）：必须引用合法的 `sandbox.<name>` 对象（显式写 `sandbox = null` 报错）。
-   - `harness`（可选，或由 Root 唯一 `harness` 自动注入）：引用合法的 `harness.<name>` 对象；省略或显式写 `harness = null` 时回退内置 `"copilot"` Harness。
+   - `harness`（必填，或由 Root 唯一 `harness` 自动注入）：必须引用合法的 `harness.<name>` 对象（无任何内置默认特例，显式写 `harness = null` 报错）。
    - `model_provider`（可选，或由 Root 唯一 `model_provider` 自动注入）：引用合法的 `model_provider.<name>` 对象；省略或显式写 `model_provider = null` 时不绑定外部 `model_provider`（交由所选 `harness` 使用原生默认认证/端点）。
    - `writable_paths`（可选 `list(string)`）：每项必须为非空相对 glob 路径（禁止 `..` 逃逸）。
    - `human_approval`（可选 `string`，默认 `"optional"`）：仅允许 `"optional"` | `"required"` | `"disabled"`。
@@ -104,7 +104,7 @@
 1. **串联链路与延迟求值**：跑通 README 四工序（`specify -> plan -> tasks -> implement`），验证 `based_source = worker.specify.work_branch`、`import_artifact`、`artifact("design").path` 全部通过 Plan 且 DAG 依赖边完全正确。
 2. **静态 `for_each` 解包**：`worker "os_ matrix" { for_each = toset(["linux", "win"]) ... }` 展开后，下游可通过 `worker.os_matrix["linux"].work_branch` 正常引用。
 3. **Root 单例绑定与正交显式置空**：
-   - Root 有 1 个 `sandbox` / `harness` / `model_provider` 时省略对应属性自动绑定并建边；0 个或 2 个 `sandbox` 时省略 `sandbox` 报错；2 个 `harness` 或 2 个 `model_provider` 时省略对应属性报歧义错误；0 个 `harness` 回退内置 `"copilot"`；
+   - Root 有 1 个 `sandbox` / `harness` / `model_provider` 时省略对应属性自动绑定并建边；0 个或 2 个 `sandbox`（或 0 个 / 2 个 `harness`）时省略对应属性报错；2 个 `model_provider` 时省略报错，0 个 `model_provider` 通过；
    - 当 Root 存在 1 个 `model_provider "openai"` 时，某 `worker` 显式声明 `harness = harness.antigravity` 与 `model_provider = null`（或在 `qc` 中异构覆盖 `harness`），不会被注入 `model_provider.openai`。
 4. **`.result` 属性门禁**：未配终止工具的 `worker` 被下游引用 `.result` 时 Plan 报错；配了 `terminate_tool_id` 时通过。
 5. **`gatekeeper` 与 `fallback` 边界**：`gatekeeper` 空 `command` 或 `working_dir = "../outside"` 报错；`fallback.target` 指向自身、下游或无正向依赖关系的旁路 `worker` 时报错；指向真实前序 `worker.tasks` 时通过。
