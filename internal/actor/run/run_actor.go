@@ -765,6 +765,7 @@ func (a *RunActor) Reconcile(ctx context.Context, req *ReconcileReq) (*Reconcile
 			return &ReconcileResp{RunID: st.RunID, Status: st.Status, DispatchedNodes: totalDispatched, EnqueuedMerges: totalEnqueued}, nil
 		}
 
+		prevStatus := st.Status
 		planResult, err := a.planReconcileActionsLocked(ctx, &st, loaded)
 		if err != nil {
 			st.Status = RunStatusFailed
@@ -775,7 +776,6 @@ func (a *RunActor) Reconcile(ctx context.Context, req *ReconcileReq) (*Reconcile
 			return &ReconcileResp{RunID: st.RunID, Status: st.Status, ErrorCode: ErrCodeInvalidInput, ErrorMessage: err.Error()}, nil
 		}
 
-		prevStatus := st.Status
 		if planResult.statusChanged || len(planResult.dispatches) > 0 || len(planResult.enqueues) > 0 || planResult.mutated {
 			if err := a.saveStateLocked(ctx, st); err != nil {
 				a.mu.Unlock()
@@ -784,7 +784,7 @@ func (a *RunActor) Reconcile(ctx context.Context, req *ReconcileReq) (*Reconcile
 		}
 		a.mu.Unlock()
 
-		if st.Status != prevStatus {
+		if planResult.statusChanged || st.Status != prevStatus {
 			if req != nil && req.Reason == "operator-recovery" {
 				snapshot := st
 				go a.syncOperatorAndEvents(context.Background(), snapshot)

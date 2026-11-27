@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/aws/smithy-go v1.28.6
+	github.com/coder/websocket v1.8.14
 	github.com/dapr/dapr v1.19.0
 	github.com/dapr/go-sdk v1.16.0
 	github.com/go-chi/chi/v5 v5.3.2
