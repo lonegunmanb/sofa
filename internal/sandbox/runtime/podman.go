@@ -293,15 +293,16 @@ func (e *PodmanEngine) RunGatekeepers(ctx context.Context, spec GatekeeperRunSpe
 			return nil, fmt.Errorf("gatekeeper %q timeout %q must be a positive duration", gk.Name, gk.Timeout)
 		}
 
+		cmd := RelocateBundleCommandArgs(gk.Command, spec.BundleDir, spec.HostWorkspaceDir)
 		containerName := "sofa-gk-" + uuid.NewString()[:12]
 		runArgs, err := BuildRunArgs(SessionMountLayout{
 			Sandbox:           spec.Sandbox,
 			HostOS:            spec.HostOS,
 			ContainerName:     containerName,
 			ForAgentSession:   false,
-			Entrypoint:        gk.Command[0],
+			Entrypoint:        cmd[0],
 			WorkingDir:        gk.WorkingDir,
-			Args:              gk.Command[1:],
+			Args:              cmd[1:],
 			HostWorkspaceDir:  spec.HostWorkspaceDir,
 			ReadOnlyWorkspace: false,
 			WritablePaths:     nil,
@@ -365,7 +366,7 @@ func (e *PodmanEngine) RunGatekeepers(ctx context.Context, spec GatekeeperRunSpe
 		if timedOut || exitCode != gk.ExpectExitCode || len(dirtyFiles) > 0 {
 			return &GatekeeperFailure{
 				Name:             gk.Name,
-				Command:          slices.Clone(gk.Command),
+				Command:          slices.Clone(cmd),
 				ExitCode:         exitCode,
 				ExpectedExitCode: gk.ExpectExitCode,
 				TimedOut:         timedOut,

@@ -335,10 +335,12 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 		artifactReworks   int
 		gatekeeperReworks int
 		qcRound           int
+		workAttempt       int
 	)
 
 	// Step 2: Main Work -> Freeze -> Artifact Validate -> Gatekeeper -> Read-Only QC rework loop.
 	for {
+		workAttempt++
 		effectiveSysPrompt := systemPrompt
 		turnPrompt := initialPrompt
 		resumeID := ""
@@ -347,6 +349,20 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 			turnPrompt = reworkPrompt
 		} else if diaryContext != "" {
 			effectiveSysPrompt = appendPromptSection(effectiveSysPrompt, diaryContext)
+		}
+
+		workSkills, skillErr := prepareSessionSkills(sessionSkillsInput{
+			SkillDirectories: req.Worker.SkillDirectories,
+			Skills:           req.Worker.Skills,
+			DisabledSkills:   req.Worker.DisabledSkills,
+			BundleDir:        req.BundleDir,
+			WorkspaceDir:     workspaceDir,
+			ImportsDir:       importsDir,
+			SandboxMounts:    workSandbox.Mounts,
+			StageRootDir:     filepath.Join(execRoot, fmt.Sprintf("work-skills-r%d", workAttempt)),
+		})
+		if skillErr != nil {
+			return NodeOutcome{Status: StatusFailed, FailureReason: skillErr.Error()}, skillErr
 		}
 
 		workLayout := sandboxruntime.SessionMountLayout{
@@ -359,6 +375,7 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 			ReadOnlyWorkspace: false,
 			WritablePaths:     slices.Clone(req.Worker.WritablePaths),
 			BundleDir:         req.BundleDir,
+			SkillsDir:         workSkills.HostSkillsDir,
 			ImportsDir:        importsDir,
 			ArtifactsDir:      artifactsDir,
 			ReadOnlyArtifacts: false,
@@ -381,9 +398,9 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 			HarnessOptionsJSON:    workHarnessOpts,
 			AvailableTools:        toToolFilter(req.Worker.AllowedTools),
 			ExcludedTools:         toToolFilter(req.Worker.DisallowedTools),
-			SkillDirectories:      slices.Clone(req.Worker.SkillDirectories),
-			Skills:                slices.Clone(req.Worker.Skills),
-			DisabledSkills:        slices.Clone(req.Worker.DisabledSkills),
+			SkillDirectories:      workSkills.SkillDirectories,
+			Skills:                workSkills.Skills,
+			DisabledSkills:        workSkills.DisabledSkills,
 			MCPServers:            workMCPServers,
 		}
 
@@ -565,6 +582,7 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 				ArtifactsDir:    artifactsDir,
 				ToolsDir:        qcToolsDir,
 				SessionStoreDir: qcStoreDir,
+				ExecRoot:        execRoot,
 			})
 			if snapErr := r.persistQCLedger(ctx, req.Epoch, qcLedger); snapErr != nil {
 				return NodeOutcome{Status: StatusFailed, FailureReason: snapErr.Error()}, snapErr
@@ -833,6 +851,7 @@ type qcRoundParams struct {
 	ArtifactsDir    string
 	ToolsDir        string
 	SessionStoreDir string
+	ExecRoot        string
 }
 
 func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest, p qcRoundParams) (session.QCResult, error) {
@@ -902,6 +921,20 @@ func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest,
 		return session.QCResult{}, err
 	}
 
+	qcSkills, err := prepareSessionSkills(sessionSkillsInput{
+		SkillDirectories: qc.SkillDirectories,
+		Skills:           qc.Skills,
+		DisabledSkills:   qc.DisabledSkills,
+		BundleDir:        req.BundleDir,
+		WorkspaceDir:     p.WorkspaceDir,
+		ImportsDir:       p.ImportsDir,
+		SandboxMounts:    qcSandbox.Mounts,
+		StageRootDir:     filepath.Join(p.ExecRoot, fmt.Sprintf("qc-skills-r%d", p.Round)),
+	})
+	if err != nil {
+		return session.QCResult{}, err
+	}
+
 	qcLayout := sandboxruntime.SessionMountLayout{
 		Sandbox:           qcSandbox,
 		HostOS:            p.HostOS,
@@ -912,6 +945,7 @@ func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest,
 		ReadOnlyWorkspace: true,
 		WritablePaths:     nil,
 		BundleDir:         req.BundleDir,
+		SkillsDir:         qcSkills.HostSkillsDir,
 		ImportsDir:        p.ImportsDir,
 		ArtifactsDir:      p.ArtifactsDir,
 		ReadOnlyArtifacts: true,
@@ -963,9 +997,9 @@ func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest,
 		HarnessOptionsJSON:    qcHarnessOpts,
 		AvailableTools:        toToolFilter(qc.AllowedTools),
 		ExcludedTools:         toToolFilter(qc.DisallowedTools),
-		SkillDirectories:      slices.Clone(qc.SkillDirectories),
-		Skills:                slices.Clone(qc.Skills),
-		DisabledSkills:        slices.Clone(qc.DisabledSkills),
+		SkillDirectories:      qcSkills.SkillDirectories,
+		Skills:                qcSkills.Skills,
+		DisabledSkills:        qcSkills.DisabledSkills,
 	}
 
 	qcRes, qcErr := session.RunQCPhase(ctx, session.QCSessionConfig{

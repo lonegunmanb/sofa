@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -1536,5 +1537,254 @@ func TestWorkerRunnerQCNestedGatekeeperBehavior(t *testing.T) {
 		require.Equal(t, "gatekeeper_exhausted", out.FallbackReason)
 		require.Len(t, gkEngine.calls, 1)
 		require.Len(t, launcher.requests, 1, "only 1 work attempt, 0 reworks, 0 QC sessions")
+	})
+}
+
+func TestWorkerRunnerSkillRelocationFilteringAndStaging(t *testing.T) {
+	ctx := context.Background()
+
+	writeSkill := func(dir, entry, content string) {
+		t.Helper()
+		p := filepath.Join(dir, entry)
+		require.NoError(t, os.MkdirAll(p, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(p, "SKILL.md"), []byte(content), 0o644))
+	}
+
+	t.Run("relocates bundle and workspace dirs, stages disabled-filtered copies with exec bits, and leniently filters skills for work and qc", func(t *testing.T) {
+		bundleDir := t.TempDir()
+		writeSkill(filepath.Join(bundleDir, "config", "skills"), "alpha", "---\nname: \"alpha-custom\"\n---\n# Alpha\n")
+		writeSkill(filepath.Join(bundleDir, "config", "skills"), "disabled_one", "---\nname: disabled_one\n---\n# Disabled\n")
+		writeSkill(filepath.Join(bundleDir, "config", "skills"), "shebang_skill", "# Shebang Skill\n")
+		scriptPath := filepath.Join(bundleDir, "config", "skills", "shebang_skill", "scripts", "run.sh")
+		require.NoError(t, os.MkdirAll(filepath.Dir(scriptPath), 0o755))
+		require.NoError(t, os.WriteFile(scriptPath, []byte("#!/bin/sh\necho ok\n"), 0o755))
+
+		writeSkill(filepath.Join(bundleDir, "modules", "sub", "skills"), "mod_skill", "# Mod\n")
+		writeSkill(filepath.Join(bundleDir, "external_skills", "abcd1234"), "ext_skill", "# Ext\n")
+		writeSkill(filepath.Join(bundleDir, "config", "qc-skills"), "qc_keep", "---\nname: qc-audit\n---\n# QC\n")
+		writeSkill(filepath.Join(bundleDir, "config", "qc-skills"), "qc_drop", "---\nname: qc-drop\n---\n# Drop\n")
+
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+
+		fakeGit := newFakeGitAdapter(shaBase)
+		fakeGit.nextCommitSHAs = []string{shaCkpt1}
+		fakeGit.onPrepare = func(destDir string) {
+			writeSkill(filepath.Join(destDir, ".agents", "skills"), "ws_skill", "# Workspace skill\n")
+		}
+
+		var (
+			workSkillsDir      string
+			workSessionCfg     harnessruntime.SessionConfig
+			qcSkillsDir        string
+			qcSessionCfg       harnessruntime.SessionConfig
+			stagedAlphaExists  bool
+			stagedDisabledGone bool
+			stagedRunMode      os.FileMode
+			qcStagedKeepExists bool
+			qcStagedDropGone   bool
+		)
+
+		launcher := &scriptedSessionLauncher{
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				func(_ string, req runner.SessionLaunchRequest) harnessruntime.Opener {
+					workSkillsDir = req.MountLayout.SkillsDir
+					if workSkillsDir != "" {
+						_, aErr := os.Stat(filepath.Join(workSkillsDir, "dir-00", "alpha", "SKILL.md"))
+						stagedAlphaExists = aErr == nil
+						_, dErr := os.Stat(filepath.Join(workSkillsDir, "dir-00", "disabled_one"))
+						stagedDisabledGone = errors.Is(dErr, os.ErrNotExist)
+						if info, sErr := os.Stat(filepath.Join(workSkillsDir, "dir-00", "shebang_skill", "scripts", "run.sh")); sErr == nil {
+							stagedRunMode = info.Mode()
+						}
+					}
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						workSessionCfg = cfg
+						return &scriptedSession{id: "w-skills", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+							return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+						}}, nil
+					}}
+				},
+				func(_ string, req runner.SessionLaunchRequest) harnessruntime.Opener {
+					qcSkillsDir = req.MountLayout.SkillsDir
+					if qcSkillsDir != "" {
+						_, kErr := os.Stat(filepath.Join(qcSkillsDir, "dir-00", "qc_keep", "SKILL.md"))
+						qcStagedKeepExists = kErr == nil
+						_, dErr := os.Stat(filepath.Join(qcSkillsDir, "dir-00", "qc_drop"))
+						qcStagedDropGone = errors.Is(dErr, os.ErrNotExist)
+					}
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						qcSessionCfg = cfg
+						return &scriptedSession{id: "qc-skills", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaQCSubmitVerdict, map[string]any{"decision": "pass", "summary": "ok"})
+							return harnessruntime.TurnSummary{FinalContent: "ok"}, nil
+						}}, nil
+					}}
+				},
+			},
+		}
+
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: &mockSandboxEngine{}, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-skills", NodeAddr: "worker.skills", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			BundleDir: bundleDir,
+			Worker: workerspec.Config{
+				Sandbox:          baseSandboxRef("work"),
+				Harness:          baseHarnessRef("copilot"),
+				Model:            "gpt-5",
+				SystemPrompt:     cty.StringVal("sys"),
+				Prompt:           cty.StringVal("go"),
+				SkillDirectories: []string{"config/skills", "modules/sub/skills", "external_skills/abcd1234", "/workspace/.agents/skills", "/workspace/nonexistent-skills"},
+				Skills:           []string{"alpha", "disabled_one", "shebang_skill", "mod_skill", "ext_skill", "ws_skill", "missing_skill"},
+				DisabledSkills:   []string{"disabled_one"},
+				QC: &workerspec.QCConfig{
+					Criteria:         cty.MapVal(map[string]cty.Value{"c": cty.StringVal("ok")}),
+					MaxQCRounds:      1,
+					SkillDirectories: []string{"config/qc-skills", "/workspace/optional-missing"},
+					Skills:           []string{"qc_keep", "qc-drop", "absent_qc_skill"},
+					DisabledSkills:   []string{"qc-drop"},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusSucceeded, out.Status)
+
+		assert.NotEmpty(t, workSkillsDir)
+		assert.True(t, stagedAlphaExists, "enabled skill alpha must be staged in workSkillsDir")
+		assert.True(t, stagedDisabledGone, "disabled skill disabled_one must be absent from workSkillsDir")
+		if goruntime.GOOS != "windows" {
+			assert.NotZero(t, stagedRunMode.Perm()&0o111, "staged run.sh must keep +x executable bit")
+		}
+		assert.Equal(t, []string{
+			"/.sofa/skills/dir-00",
+			"/.sofa/bundle/modules/sub/skills",
+			"/.sofa/bundle/external_skills/abcd1234",
+			"/workspace/.agents/skills",
+			"/workspace/nonexistent-skills",
+		}, workSessionCfg.SkillDirectories)
+		assert.Equal(t, []string{"alpha-custom", "shebang_skill", "mod_skill", "ext_skill", "ws_skill"}, workSessionCfg.Skills)
+		assert.Equal(t, []string{"disabled_one"}, workSessionCfg.DisabledSkills)
+
+		assert.NotEmpty(t, qcSkillsDir)
+		assert.NotEqual(t, workSkillsDir, qcSkillsDir)
+		assert.True(t, qcStagedKeepExists)
+		assert.True(t, qcStagedDropGone)
+		assert.Equal(t, []string{"/.sofa/skills/dir-00", "/workspace/optional-missing"}, qcSessionCfg.SkillDirectories)
+		assert.Equal(t, []string{"qc-audit"}, qcSessionCfg.Skills)
+		assert.Equal(t, []string{"qc-drop"}, qcSessionCfg.DisabledSkills)
+	})
+
+	t.Run("legacy direct caller passing config dir as BundleDir relocates config/skills to /.sofa/bundle/skills", func(t *testing.T) {
+		legacyConfigDir := t.TempDir()
+		writeSkill(filepath.Join(legacyConfigDir, "skills"), "legacy_skill", "# Legacy\n")
+
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+		fakeGit := newFakeGitAdapter(shaBase)
+		fakeGit.nextCommitSHAs = []string{shaCkpt1}
+
+		var workCfg harnessruntime.SessionConfig
+		launcher := &scriptedSessionLauncher{
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						workCfg = cfg
+						return &scriptedSession{id: "w-legacy", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+							return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+						}}, nil
+					}}
+				},
+			},
+		}
+
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: &mockSandboxEngine{}, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-legacy-skills", NodeAddr: "worker.legacy", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			BundleDir: legacyConfigDir,
+			Worker: workerspec.Config{
+				Sandbox:          baseSandboxRef("work"),
+				Harness:          baseHarnessRef("copilot"),
+				Model:            "gpt-5",
+				SystemPrompt:     cty.StringVal("sys"),
+				Prompt:           cty.StringVal("go"),
+				SkillDirectories: []string{"config/skills"},
+				Skills:           []string{"legacy_skill"},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusSucceeded, out.Status)
+		assert.Equal(t, []string{"/.sofa/bundle/skills"}, workCfg.SkillDirectories)
+		assert.Equal(t, []string{"legacy_skill"}, workCfg.Skills)
+	})
+
+	t.Run("container-image-baked unmapped skill_directories preserves non-disabled skills on host", func(t *testing.T) {
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+		fakeGit := newFakeGitAdapter(shaBase)
+		fakeGit.nextCommitSHAs = []string{shaCkpt1}
+
+		var workCfg harnessruntime.SessionConfig
+		launcher := &scriptedSessionLauncher{
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						workCfg = cfg
+						return &scriptedSession{id: "w-baked", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+							return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+						}}, nil
+					}}
+				},
+			},
+		}
+
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: &mockSandboxEngine{}, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-baked-skills", NodeAddr: "worker.baked", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			Worker: workerspec.Config{
+				Sandbox:          baseSandboxRef("work"),
+				Harness:          baseHarnessRef("copilot"),
+				Model:            "gpt-5",
+				SystemPrompt:     cty.StringVal("sys"),
+				Prompt:           cty.StringVal("go"),
+				SkillDirectories: []string{"/opt/image-skills"},
+				Skills:           []string{"baked-skill", "disabled-baked"},
+				DisabledSkills:   []string{"disabled-baked"},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusSucceeded, out.Status)
+		assert.Equal(t, []string{"/opt/image-skills"}, workCfg.SkillDirectories)
+		assert.Equal(t, []string{"baked-skill"}, workCfg.Skills)
+		assert.Equal(t, []string{"disabled-baked"}, workCfg.DisabledSkills)
 	})
 }

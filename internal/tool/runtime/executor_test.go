@@ -716,3 +716,71 @@ func TestMCPResourceReaderWhitelist(t *testing.T) {
 	assert.Contains(t, okOut.TextResultForLLM, "hello from mcp")
 	assert.Equal(t, int32(1), called.Load())
 }
+
+func TestExecutorExternalToolRelocatesBundleProgram(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	bundleDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(bundleDir, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "config", "tool.sh"), []byte("#!/bin/sh\necho '{\"ok\":true}'\n"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(bundleDir, "modules", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "modules", "sub", "run.sh"), []byte("#!/bin/sh\necho '{\"ok\":true}'\n"), 0o755))
+	// Workspace has config/ws_tool.sh -> must NOT be shadowed by bundleDir!
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "config", "ws_tool.sh"), []byte("#!/bin/sh\n"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "config", "ws_tool.sh"), []byte("#!/bin/sh\n"), 0o755))
+
+	inType := cty.Object(map[string]cty.Type{"q": cty.String})
+	outType := cty.Object(map[string]cty.Type{"ok": cty.Bool})
+	inTypeBytes, _ := ctyjson.MarshalType(inType)
+	outTypeBytes, _ := ctyjson.MarshalType(outType)
+
+	var recorded [][]string
+	exec := toolruntime.NewExecutor(toolruntime.ExecutorOptions{
+		WorkspaceDir: ws,
+		BundleDir:    bundleDir,
+		Exec: func(_ context.Context, _ string, command []string, _ map[string]string, _ []byte) (string, string, int, error) {
+			recorded = append(recorded, append([]string(nil), command...))
+			return `{"ok":true}`, "", 0, nil
+		},
+	})
+
+	cases := []struct {
+		name    string
+		program []string
+		want    []string
+	}{
+		{
+			name:    "config script relocated",
+			program: []string{"sh", "config/tool.sh"},
+			want:    []string{"sh", "/.sofa/bundle/config/tool.sh"},
+		},
+		{
+			name:    "module entrypoint relocated",
+			program: []string{"modules/sub/run.sh", "--flag"},
+			want:    []string{"/.sofa/bundle/modules/sub/run.sh", "--flag"},
+		},
+		{
+			name:    "workspace file takes precedence over bundle",
+			program: []string{"sh", "config/ws_tool.sh"},
+			want:    []string{"sh", "config/ws_tool.sh"},
+		},
+	}
+
+	for i, tc := range cases {
+		spec := plan.ToolSpec{
+			ID:         "tool_external_tool_reloc_" + tc.name,
+			Name:       "reloc",
+			Address:    "external_tool.reloc",
+			Kind:       "external",
+			Program:    tc.program,
+			InputType:  inTypeBytes,
+			OutputType: outTypeBytes,
+		}
+		res, err := exec.Invoke(t.Context(), toolruntime.ToolBinding{Spec: spec}, []byte(`{"q":"hi"}`))
+		require.NoError(t, err, tc.name)
+		require.True(t, res.Accepted, tc.name)
+		assert.Equal(t, tc.want, recorded[i], tc.name)
+	}
+}

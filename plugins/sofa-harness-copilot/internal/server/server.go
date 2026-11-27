@@ -387,6 +387,8 @@ func (s *Server) OpenSession(ctx context.Context, req *harnessv1.OpenSessionRequ
 		}, nil
 	}
 
+	filteredSkills, normalizedDisabled := filterEnabledSkills(req.GetSkillDirectories(), req.GetSkills(), req.GetDisabledSkills())
+
 	sdkCfg := &sdk.SessionConfig{
 		SessionID:              sessionID,
 		Model:                  req.GetModel(),
@@ -402,18 +404,18 @@ func (s *Server) OpenSession(ctx context.Context, req *harnessv1.OpenSessionRequ
 		OnPermissionRequest:    sdk.PermissionHandler.ApproveAll,
 		EnableSkills:           sdk.Bool(true),
 		SkillDirectories:       slices.Clone(req.GetSkillDirectories()),
-		DisabledSkills:         slices.Clone(req.GetDisabledSkills()),
+		DisabledSkills:         normalizedDisabled,
 		EnableSessionStore:     sdk.Bool(false),
 		SkipEmbeddingRetrieval: sdk.Bool(true),
 		LargeOutput:            &sdk.LargeToolOutputConfig{Enabled: sdk.Bool(false)},
 		Hooks:                  managed.buildSessionHooks(),
 		MCPServers:             mcpServers,
 	}
-	if len(req.GetSkills()) > 0 {
+	if len(filteredSkills) > 0 {
 		sdkCfg.CustomAgents = []sdk.CustomAgentConfig{{
 			Name:            customAgentName,
 			Prompt:          req.GetSystemPrompt(),
-			Skills:          slices.Clone(req.GetSkills()),
+			Skills:          filteredSkills,
 			Model:           profile,
 			ReasoningEffort: req.GetReasoningEffort(),
 		}}
@@ -913,6 +915,135 @@ func buildProviderConfig(p *harnessv1.ProviderConfig, profile, model string) (*s
 		BearerToken: p.GetBearerToken(),
 	}
 	return out, nil
+}
+
+func filterEnabledSkills(skillDirs, skills, disabled []string) ([]string, []string) {
+	disabledSet := make(map[string]struct{}, len(disabled))
+	var normalizedDisabled []string
+	if disabled != nil {
+		normalizedDisabled = make([]string, 0, len(disabled))
+	}
+	for _, raw := range disabled {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if _, dup := disabledSet[trimmed]; dup {
+			continue
+		}
+		disabledSet[trimmed] = struct{}{}
+		normalizedDisabled = append(normalizedDisabled, trimmed)
+	}
+
+	hasExistingDir := false
+	enabledByEffective := make(map[string]string)
+	enabledByEntry := make(map[string]string)
+	for _, rawDir := range skillDirs {
+		dir := strings.TrimSpace(rawDir)
+		if dir == "" {
+			continue
+		}
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		hasExistingDir = true
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, ent := range entries {
+			if ent.Type()&os.ModeSymlink != 0 || !ent.IsDir() {
+				continue
+			}
+			entryName := ent.Name()
+			skillMDPath := filepath.Join(dir, entryName, "SKILL.md")
+			mdInfo, mdErr := os.Lstat(skillMDPath)
+			if mdErr != nil || mdInfo.Mode()&os.ModeSymlink != 0 || !mdInfo.Mode().IsRegular() {
+				continue
+			}
+			mdBytes, readErr := os.ReadFile(skillMDPath)
+			if readErr != nil {
+				continue
+			}
+			effName := parseSkillFrontmatterName(string(mdBytes), entryName)
+			if _, isDisabled := disabledSet[effName]; isDisabled {
+				continue
+			}
+			if _, isDisabled := disabledSet[entryName]; isDisabled {
+				continue
+			}
+			if _, exists := enabledByEffective[effName]; !exists {
+				enabledByEffective[effName] = effName
+			}
+			if _, exists := enabledByEntry[entryName]; !exists {
+				enabledByEntry[entryName] = effName
+			}
+		}
+	}
+
+	var filteredSkills []string
+	seen := make(map[string]struct{}, len(skills))
+	for _, raw := range skills {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if _, isDisabled := disabledSet[trimmed]; isDisabled {
+			continue
+		}
+		resolved := trimmed
+		if hasExistingDir {
+			if matched, ok := enabledByEffective[trimmed]; ok {
+				resolved = matched
+			} else if matched, ok := enabledByEntry[trimmed]; ok {
+				resolved = matched
+			} else {
+				continue
+			}
+			if _, isDisabled := disabledSet[resolved]; isDisabled {
+				continue
+			}
+		}
+		if _, dup := seen[resolved]; dup {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		filteredSkills = append(filteredSkills, resolved)
+	}
+	return filteredSkills, normalizedDisabled
+}
+
+func parseSkillFrontmatterName(content, fallbackDirName string) string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	if !strings.HasPrefix(normalized, "---\n") {
+		return fallbackDirName
+	}
+	rest := normalized[len("---\n"):]
+	endIdx := strings.Index(rest, "\n---")
+	if endIdx < 0 {
+		return fallbackDirName
+	}
+	after := rest[endIdx+len("\n---"):]
+	if after != "" && !strings.HasPrefix(after, "\n") {
+		return fallbackDirName
+	}
+	block := rest[:endIdx]
+	for _, line := range strings.Split(block, "\n") {
+		if !strings.HasPrefix(line, "name:") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		val = strings.TrimSpace(val)
+		if val != "" {
+			return val
+		}
+	}
+	return fallbackDirName
 }
 
 func buildToolFilter(f *harnessv1.ToolFilter) []string {

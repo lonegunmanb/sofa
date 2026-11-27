@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/lonegunmanb/sofa/internal/harness/installer"
@@ -59,6 +60,7 @@ type SessionMountLayout struct {
 	ReadOnlyWorkspace bool
 	WritablePaths     []string
 	BundleDir         string
+	SkillsDir         string
 	ImportsDir        string
 	ArtifactsDir      string
 	ReadOnlyArtifacts bool
@@ -354,6 +356,7 @@ func BuildRunArgs(layout SessionMountLayout) ([]string, error) {
 		readOnly bool
 	}{
 		{layout.BundleDir, "/.sofa/bundle", true},
+		{layout.SkillsDir, "/.sofa/skills", true},
 		{layout.ImportsDir, "/.sofa/imports", true},
 		{layout.ArtifactsDir, "/.sofa/artifacts", artifactsRO},
 		{layout.ToolsDir, "/.sofa/tools", true},
@@ -456,4 +459,57 @@ func validateHandshakeEnvEntry(entry string) error {
 		return fmt.Errorf("handshake env key %q is forbidden: only SOFA_HARNESS_PLUGIN and PLUGIN_* are permitted", key)
 	}
 	return nil
+}
+
+// RelocateBundleCommandArgs rewrites clean bundle-relative slash arguments ("config/..." or
+// "modules/...") to "/.sofa/bundle/<cleaned>" when present under bundleDir and absent under
+// hostWorkspaceDir, ensuring workspace files are never shadowed.
+func RelocateBundleCommandArgs(args []string, bundleDir, hostWorkspaceDir string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := slices.Clone(args)
+	trimmedBundle := strings.TrimSpace(bundleDir)
+	if trimmedBundle == "" {
+		return out
+	}
+	trimmedWS := strings.TrimSpace(hostWorkspaceDir)
+	for i, arg := range out {
+		cleaned, ok := cleanBundleCommandArg(arg)
+		if !ok {
+			continue
+		}
+		bundlePath := filepath.Join(trimmedBundle, filepath.FromSlash(cleaned))
+		if _, err := os.Stat(bundlePath); err != nil {
+			continue
+		}
+		if trimmedWS != "" {
+			wsPath := filepath.Join(trimmedWS, filepath.FromSlash(cleaned))
+			if _, err := os.Stat(wsPath); err == nil {
+				continue
+			}
+		}
+		out[i] = "/.sofa/bundle/" + cleaned
+	}
+	return out
+}
+
+func cleanBundleCommandArg(raw string) (string, bool) {
+	if raw == "" || strings.Contains(raw, `\`) || strings.HasPrefix(raw, "/") {
+		return "", false
+	}
+	if len(raw) >= 2 && isASCIIAlpha(raw[0]) && raw[1] == ':' {
+		return "", false
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
+	cleaned := path.Clean(raw)
+	cleaned = strings.TrimPrefix(cleaned, "./")
+	if strings.HasPrefix(cleaned, "config/") || strings.HasPrefix(cleaned, "modules/") {
+		return cleaned, true
+	}
+	return "", false
 }

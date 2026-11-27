@@ -700,10 +700,10 @@ func (d *WorkerDaemon) runNodeTask(
 	)
 
 	bundleInfo, bundleErr := d.ensureRunBundleExtracted(ctx, req.RunID, req.PlanBlobKey, req.PlanSHA256)
-	var bundleDir string
 	if bundleErr == nil {
-		bundleDir, bundleErr = bundleDirForExtract(bundleInfo.ExtractDir, req.BundlePath)
+		bundleErr = validateBundlePath(req.BundlePath)
 	}
+	bundleDir := bundleInfo.ExtractDir
 	if bundleErr != nil {
 		outcome = runner.NodeOutcome{
 			Status:        runner.StatusFailed,
@@ -914,10 +914,10 @@ func (d *WorkerDaemon) runMergeTask(
 	)
 
 	bundleInfo, bundleErr := d.ensureRunBundleExtracted(ctx, req.RunID, req.PlanBlobKey, req.PlanSHA256)
-	var bundleDir string
 	if bundleErr == nil {
-		bundleDir, bundleErr = bundleDirForExtract(bundleInfo.ExtractDir, req.BundlePath)
+		bundleErr = validateBundlePath(req.BundlePath)
 	}
+	bundleDir := bundleInfo.ExtractDir
 	if bundleErr != nil {
 		execErr = bundleErr
 	} else {
@@ -1644,30 +1644,19 @@ func loadPluginLockFromExtract(extractDir string) (harness.PluginLockFile, error
 	return lockFile, nil
 }
 
-func bundleDirForExtract(extractDir, bundlePath string) (string, error) {
-	if strings.TrimSpace(extractDir) == "" {
-		return "", nil
+func validateBundlePath(bundlePath string) error {
+	bp := strings.TrimSpace(bundlePath)
+	if bp == "" {
+		return nil
 	}
-	if bp := strings.TrimSpace(bundlePath); bp != "" {
-		if strings.Contains(bp, `\`) || strings.HasPrefix(bp, "/") || (len(bp) >= 2 && isASCIIAlpha(bp[0]) && bp[1] == ':') {
-			return "", fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
-		}
-		cleaned := path.Clean(filepath.ToSlash(bp))
-		if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
-			return "", fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
-		}
-		if cleaned != "." {
-			candidate := filepath.Join(extractDir, filepath.FromSlash(cleaned))
-			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-				return candidate, nil
-			}
-		}
+	if strings.Contains(bp, `\`) || strings.HasPrefix(bp, "/") || (len(bp) >= 2 && isASCIIAlpha(bp[0]) && bp[1] == ':') {
+		return fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
 	}
-	cfgDir := filepath.Join(extractDir, "config")
-	if info, err := os.Stat(cfgDir); err == nil && info.IsDir() {
-		return cfgDir, nil
+	cleaned := path.Clean(filepath.ToSlash(bp))
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
 	}
-	return extractDir, nil
+	return nil
 }
 
 func isASCIIAlpha(b byte) bool {

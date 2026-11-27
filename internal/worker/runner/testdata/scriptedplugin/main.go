@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,7 +79,49 @@ func (s *scriptedServer) RunTurn(stream harnessv1.AgentHarness_RunTurnServer) er
 	if sessReq.Model == "qc-model" {
 		return s.runQC(stream, startReq)
 	}
+	if sessReq.Model == "work-skills-model" {
+		if err := verifyContainerSkills(sessReq); err != nil {
+			return err
+		}
+	}
 	return s.runWork(stream, startReq)
+}
+
+func verifyContainerSkills(req *harnessv1.OpenSessionRequest) error {
+	disabled := make(map[string]struct{}, len(req.DisabledSkills))
+	for _, d := range req.DisabledSkills {
+		disabled[d] = struct{}{}
+	}
+	for _, s := range req.Skills {
+		if _, bad := disabled[s]; bad {
+			return fmt.Errorf("disabled skill %q leaked into OpenSessionRequest.Skills", s)
+		}
+	}
+	for _, dir := range req.SkillDirectories {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("read container skill dir %q: %w", dir, err)
+		}
+		for _, ent := range entries {
+			if _, bad := disabled[ent.Name()]; bad {
+				return fmt.Errorf("disabled skill directory %q still present under %q", ent.Name(), dir)
+			}
+			skillMD := filepath.Join(dir, ent.Name(), "SKILL.md")
+			if _, err := os.ReadFile(skillMD); err != nil {
+				return fmt.Errorf("read SKILL.md at %q: %w", skillMD, err)
+			}
+			helperSh := filepath.Join(dir, ent.Name(), "scripts", "helper.sh")
+			if info, statErr := os.Stat(helperSh); statErr == nil {
+				if info.Mode().Perm()&0o111 == 0 {
+					return fmt.Errorf("expected helper script %q to have +x mode, got %o", helperSh, info.Mode().Perm())
+				}
+				if out, execErr := exec.Command(helperSh).CombinedOutput(); execErr != nil {
+					return fmt.Errorf("execute %q: %v (%s)", helperSh, execErr, string(out))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func invokeHostTool(stream harnessv1.AgentHarness_RunTurnServer, callID, toolName string, payload any) (*harnessv1.InvokeHostToolResponse, error) {

@@ -16,6 +16,7 @@ import (
 	"github.com/lonegunmanb/sofa/internal/git"
 	harnessinstaller "github.com/lonegunmanb/sofa/internal/harness/installer"
 	harnessspec "github.com/lonegunmanb/sofa/internal/harness/spec"
+	"github.com/lonegunmanb/sofa/internal/plan"
 	sandboxruntime "github.com/lonegunmanb/sofa/internal/sandbox/runtime"
 	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
@@ -401,4 +402,152 @@ func TestExecuteMergeCandidateEndToEndGitAndPodmanIntegration(t *testing.T) {
 	tipAfter3b, err := gitAdapter.ResolveBranchSHA(ctx, bareDir, targetBranch, git.AuthConfig{})
 	require.NoError(t, err)
 	require.Equal(t, cand2MergedSHA, tipAfter3b)
+}
+
+func TestWorkerRunnerBundleMountSkillStagingAndGatekeeperIntegration(t *testing.T) {
+	ctx := context.Background()
+	bareDir, _, _ := initBareRepoForRunner(t)
+
+	eng := sandboxruntime.NewPodmanEngine(sandboxruntime.PodmanEngineOptions{})
+	platform, err := eng.DetectPlatform(ctx)
+	require.NoError(t, err)
+	pluginRoot := crossCompileScriptedPlugin(t, platform.Arch)
+
+	// Author config/ + external skills, save .sofaplan, and extract full <extractRoot>.
+	srcRoot := t.TempDir()
+	configDir := filepath.Join(srcRoot, "config")
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "skills", "enabled_skill", "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "skills", "enabled_skill", "SKILL.md"), []byte("---\nname: enabled-skill\n---\n# Enabled\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "skills", "enabled_skill", "scripts", "helper.sh"), []byte("#!/bin/sh\necho helper-ok\n"), 0o755))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "skills", "disabled_skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "skills", "disabled_skill", "SKILL.md"), []byte("---\nname: disabled_skill\n---\n# Disabled\n"), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "gatekeeper.sh"), []byte("#!/bin/sh\ntest \"$(cat allowed/feature.txt)\" = \"feature-v1\"\n"), 0o755))
+
+	extSkillsDir := filepath.Join(srcRoot, "ext-skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(extSkillsDir, "ext_helper", "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(extSkillsDir, "ext_helper", "SKILL.md"), []byte("---\nname: ext-helper\n---\n# External\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(extSkillsDir, "ext_helper", "scripts", "helper.sh"), []byte("#!/bin/sh\necho ext-ok\n"), 0o755))
+
+	planned, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address:          "worker.impl",
+				CanonicalAddress: "worker.impl",
+				Kind:             "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"skill_directories": cty.ListVal([]cty.Value{
+						cty.StringVal("./skills"),
+						cty.StringVal("../ext-skills"),
+					}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.sofaplan")
+	require.NoError(t, plan.SaveArchive(archivePath, planned, plan.ArchiveSource{
+		ConfigDir:     configDir,
+		RootSourceDir: configDir,
+	}))
+
+	extractRoot := filepath.Join(t.TempDir(), "extracted")
+	loaded, err := plan.LoadArchive(archivePath, extractRoot, plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	var normalizedDirs []string
+	rawDirs := loaded.Plan.Nodes()[0].Config.GetAttr("skill_directories")
+	for it := rawDirs.ElementIterator(); it.Next(); {
+		_, v := it.Element()
+		normalizedDirs = append(normalizedDirs, v.AsString())
+	}
+	require.Len(t, normalizedDirs, 2)
+	require.Equal(t, "config/skills", normalizedDirs[0])
+	require.True(t, strings.HasPrefix(normalizedDirs[1], "external_skills/"))
+
+	sharedRoot := t.TempDir()
+	blobStore, err := blob.NewLocalStore(filepath.Join(sharedRoot, "blobs"))
+	require.NoError(t, err)
+	artSvc := artifact.NewService(blobStore, artifact.ServiceOptions{})
+
+	runID := "run-int-skills"
+	nodeAddr := "worker.impl"
+	ledger := git.NewLedger(git.SourceRef{URL: bareDir, Branch: "main"})
+	gitAdapter := git.NewCLIAdapter(git.CLIAdapterOptions{Ledger: ledger})
+	cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{
+		InitialEpoch: 1,
+		Ledger:       ledger,
+		OwnerNode:    nodeAddr,
+	})
+	require.NoError(t, err)
+
+	r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+		ControlPlane:  cp,
+		GitAdapter:    gitAdapter,
+		BlobStore:     blobStore,
+		ArtifactSvc:   artSvc,
+		SandboxEngine: eng,
+		SessionLauncher: &runner.ContainerSessionLauncher{
+			Installer:    harnessinstaller.NewInstaller(),
+			ToolCacheDir: filepath.Join(sharedRoot, "tool-cache"),
+			StartTimeout: 30 * time.Second,
+		},
+	})
+	require.NoError(t, err)
+
+	psBefore, err := exec.Command("podman", "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
+	require.NoError(t, err)
+
+	outcome, err := r.Run(ctx, runner.NodeExecutionRequest{
+		RunID:       runID,
+		NodeAddr:    nodeAddr,
+		Epoch:       1,
+		RepoURL:     bareDir,
+		BasedSource: "main",
+		BundleDir:   extractRoot,
+		TempRoot:    filepath.Join(sharedRoot, "runner-tmp"),
+		Sandboxes: map[string]sandboxspec.SandboxConfig{
+			"sandbox.alpine": {Runtime: "podman", Image: integrationImage, Network: "bridge"},
+		},
+		Harnesses: map[string]harnessspec.HarnessConfig{
+			"harness.scripted": {Name: "scripted"},
+		},
+		PluginResolveOpts: harnessinstaller.ResolveOptions{
+			PluginDir: pluginRoot,
+		},
+		Worker: workerspec.Config{
+			Sandbox:          baseSandboxRef("alpine"),
+			Harness:          baseHarnessRef("scripted"),
+			Model:            "work-skills-model",
+			SystemPrompt:     cty.StringVal("work"),
+			Prompt:           cty.StringVal("Verify skills"),
+			WritablePaths:    []string{"allowed/**"},
+			SkillDirectories: normalizedDirs,
+			Skills:           []string{"enabled_skill", "disabled_skill", "ext-helper", "missing_skill"},
+			DisabledSkills:   []string{"disabled_skill"},
+			QC: &workerspec.QCConfig{
+				Gatekeepers: []workerspec.GatekeeperConfig{
+					{
+						Name:             "bundle_gk",
+						Command:          []string{"config/gatekeeper.sh"},
+						WorkingDir:       ".",
+						Timeout:          "1m",
+						ExpectExitCode:   0,
+						RequireCleanTree: true,
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, runner.StatusSucceeded, outcome.Status)
+
+	require.Eventually(t, func() bool {
+		psAfter, psErr := exec.Command("podman", "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
+		return psErr == nil && strings.TrimSpace(string(psBefore)) == strings.TrimSpace(string(psAfter))
+	}, 10*time.Second, 200*time.Millisecond)
 }

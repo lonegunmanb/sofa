@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -213,6 +215,142 @@ def _parse_builtin_tools(names: list[str]) -> list[Any]:
     return parsed
 
 
+def _parse_skill_frontmatter_name(skill_md_text: str, fallback_dir_name: str) -> str:
+    """Extract top-level frontmatter `name:` from SKILL.md or fall back to directory name."""
+    normalized = skill_md_text.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.startswith("---\n"):
+        return fallback_dir_name
+    rest = normalized[len("---\n") :]
+    end_idx = rest.find("\n---")
+    if end_idx < 0:
+        return fallback_dir_name
+    after = rest[end_idx + len("\n---") :]
+    if after and not after.startswith("\n"):
+        return fallback_dir_name
+    block = rest[:end_idx]
+    for line in block.split("\n"):
+        if not line.startswith("name:"):
+            continue
+        val = line[len("name:") :].strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+            val = val[1:-1]
+        val = val.strip()
+        if val:
+            return val
+    return fallback_dir_name
+
+
+def _copy_clean_skill_subdir(src_dir: Path, dst_dir: Path) -> None:
+    """Copy a skill directory without symlinks, preserving executable modes."""
+    if src_dir.is_symlink() or not src_dir.is_dir():
+        return
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for entry in os.scandir(src_dir):
+        if entry.is_symlink():
+            continue
+        src_path = Path(entry.path)
+        dst_path = dst_dir / entry.name
+        if entry.is_dir(follow_symlinks=False):
+            _copy_clean_skill_subdir(src_path, dst_path)
+        elif entry.is_file(follow_symlinks=False):
+            shutil.copy2(src_path, dst_path)
+
+
+def _prepare_skills(
+    params: SessionOpenParams,
+) -> tuple[list[str], list[tuple[str, Path, str]], list[str], str | None]:
+    """Filter disabled skills onto clean per-session dirs and resolve lenient eager skills."""
+    disabled = {s.strip() for s in params.disabled_skills if s and s.strip()}
+    effective_skills_paths: list[str] = []
+    temp_stage_root: str | None = None
+    stage_base: Path | None = None
+
+    # Track discovered enabled skills: maps lookup name -> (effective_name, subdir_path, skill_md_text)
+    by_effective: dict[str, tuple[str, Path, str]] = {}
+    by_entry: dict[str, tuple[str, Path, str]] = {}
+
+    for idx, raw_dir in enumerate(params.skill_directories):
+        dir_str = (raw_dir or "").strip()
+        if not dir_str:
+            continue
+        dir_path = Path(dir_str)
+        if not dir_path.is_dir() or dir_path.is_symlink():
+            # Lenient mode: keep unmapped/missing directories unchanged.
+            effective_skills_paths.append(dir_str)
+            continue
+
+        enabled_items: list[tuple[str, str, Path, str]] = []
+        excluded_any = False
+        for entry in sorted(os.scandir(dir_path), key=lambda e: e.name):
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+            skill_md = Path(entry.path) / "SKILL.md"
+            if skill_md.is_symlink() or not skill_md.is_file():
+                continue
+            md_text = skill_md.read_text(encoding="utf-8")
+            eff_name = _parse_skill_frontmatter_name(md_text, entry.name)
+            if eff_name in disabled or entry.name in disabled:
+                excluded_any = True
+                continue
+            enabled_items.append((eff_name, entry.name, Path(entry.path), md_text))
+
+        if disabled and excluded_any:
+            if stage_base is None:
+                if params.session_store_directory:
+                    stage_base = Path(params.session_store_directory) / ".sofa-filtered-skills"
+                else:
+                    temp_stage_root = tempfile.mkdtemp(prefix="sofa-ag-skills-")
+                    stage_base = Path(temp_stage_root) / ".sofa-filtered-skills"
+            staged_dir = stage_base / f"dir-{idx}"
+            if staged_dir.exists():
+                shutil.rmtree(staged_dir, ignore_errors=True)
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            for eff_name, entry_name, src_subdir, md_text in enabled_items:
+                dst_subdir = staged_dir / entry_name
+                _copy_clean_skill_subdir(src_subdir, dst_subdir)
+                by_effective.setdefault(eff_name, (eff_name, dst_subdir, md_text))
+                by_entry.setdefault(entry_name, (eff_name, dst_subdir, md_text))
+            effective_skills_paths.append(str(staged_dir))
+        else:
+            for eff_name, entry_name, src_subdir, md_text in enabled_items:
+                by_effective.setdefault(eff_name, (eff_name, src_subdir, md_text))
+                by_entry.setdefault(entry_name, (eff_name, src_subdir, md_text))
+            effective_skills_paths.append(dir_str)
+
+    active_entries: list[tuple[str, Path, str]] = []
+    effective_skills: list[str] = []
+    seen_skills: set[str] = set()
+    for raw_skill in params.skills:
+        req_name = (raw_skill or "").strip()
+        if not req_name or req_name in disabled:
+            continue
+        matched = by_effective.get(req_name) or by_entry.get(req_name)
+        if matched is None:
+            # Lenient mode: silently skip missing requested skills.
+            continue
+        eff_name, _, _ = matched
+        if eff_name in disabled or eff_name in seen_skills:
+            continue
+        seen_skills.add(eff_name)
+        active_entries.append(matched)
+        effective_skills.append(eff_name)
+
+    return effective_skills_paths, active_entries, effective_skills, temp_stage_root
+
+
+def _build_system_instructions_with_skills(
+    base_prompt: str, active_entries: list[tuple[str, Path, str]]
+) -> str:
+    parts: list[str] = []
+    if base_prompt:
+        parts.append(base_prompt)
+    for eff_name, skill_dir_path, md_text in active_entries:
+        parts.append(
+            f"Active Skill ({eff_name}) [directory: {skill_dir_path}]:\n{md_text.strip()}"
+        )
+    return "\n\n".join(parts)
+
+
 class GoogleAntigravitySession:
     """Live session wrapping google.antigravity.Agent."""
 
@@ -228,15 +366,17 @@ class GoogleAntigravitySession:
         self._agent: Any = None
         self._entered = False
         self._tool_call_names: dict[str, str] = {}
+        self._temp_stage_root: str | None = None
 
     async def start(self) -> None:
         from google.antigravity import Agent
 
-        config = self._backend.build_agent_config(
+        config, temp_stage_root = self._backend._build_agent_config_with_stage_root(
             self._params,
             tool_callables=self._build_host_tool_callables(),
             hooks=self._build_hooks(),
         )
+        self._temp_stage_root = temp_stage_root
         self._agent = Agent(config)
         await self._agent.__aenter__()
         self._entered = True
@@ -448,6 +588,9 @@ class GoogleAntigravitySession:
                     self._entered = False
                     self._agent = None
         finally:
+            if self._temp_stage_root:
+                shutil.rmtree(self._temp_stage_root, ignore_errors=True)
+                self._temp_stage_root = None
             for key, sess in list(self._backend._sessions.items()):
                 if sess is self:
                     self._backend._sessions.pop(key, None)
@@ -465,6 +608,15 @@ class GoogleAntigravityBackend:
         tool_callables: list[Any],
         hooks: list[Any],
     ) -> Any:
+        config, _ = self._build_agent_config_with_stage_root(params, tool_callables, hooks)
+        return config
+
+    def _build_agent_config_with_stage_root(
+        self,
+        params: SessionOpenParams,
+        tool_callables: list[Any],
+        hooks: list[Any],
+    ) -> tuple[Any, str | None]:
         from google.antigravity import CapabilitiesConfig, LocalAgentConfig, types as ag_types
         from google.antigravity.hooks import policy
 
@@ -537,8 +689,13 @@ class GoogleAntigravityBackend:
             else:
                 conv_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"sofa:antigravity:{raw_conv_id}"))
 
+        effective_skills_paths, active_entries, _, temp_stage_root = _prepare_skills(params)
+        combined_instructions = _build_system_instructions_with_skills(
+            params.system_prompt or "", active_entries
+        )
+
         kwargs: dict[str, Any] = {
-            "system_instructions": params.system_prompt or None,
+            "system_instructions": combined_instructions or None,
             "capabilities": caps,
             "tools": tool_callables or None,
             "hooks": hooks or None,
@@ -547,7 +704,7 @@ class GoogleAntigravityBackend:
             "env": sdk_env or None,
             "conversation_id": conv_id,
             "save_dir": save_dir,
-            "skills_paths": list(params.skill_directories) or None,
+            "skills_paths": effective_skills_paths or None,
             "model": effective_model,
             "api_key": api_key,
         }
@@ -556,7 +713,7 @@ class GoogleAntigravityBackend:
         if params.resume_session_id:
             kwargs["session_continuation_mode"] = ag_types.SessionContinuationMode.RESUME_OR_FAIL
 
-        return LocalAgentConfig(**kwargs)
+        return LocalAgentConfig(**kwargs), temp_stage_root
 
     async def open_session(self, params: SessionOpenParams) -> tuple[str, bool, AgentSession]:
         if params.resume_session_id:
@@ -583,6 +740,13 @@ class ScriptedFakeSession:
     def __init__(self, params: SessionOpenParams) -> None:
         self.params = params
         self._host_tool_names = {spec.name for spec in params.host_tools}
+        eff_paths, active_entries, eff_skills, temp_stage_root = _prepare_skills(params)
+        self._temp_stage_root = temp_stage_root
+        self.effective_skill_directories = eff_paths
+        self.effective_skills = eff_skills
+        self.effective_system_instructions = _build_system_instructions_with_skills(
+            params.system_prompt or "", active_entries
+        )
 
     async def run_turn(self, turn_id: str, prompt: str, callbacks: TurnCallbacks) -> TurnOutcome:
         message_id = f"msg-{turn_id}"
@@ -764,6 +928,9 @@ class ScriptedFakeSession:
         return []
 
     async def close(self) -> None:
+        if self._temp_stage_root:
+            shutil.rmtree(self._temp_stage_root, ignore_errors=True)
+            self._temp_stage_root = None
         return None
 
 

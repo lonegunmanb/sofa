@@ -678,3 +678,142 @@ async def test_cross_container_resume_via_session_store_directory(tmp_path, monk
     await sess_obj.close()
     assert "s-with-dir" not in ag_backend._sessions
     assert started_ids == ["s-with-dir"]
+
+
+def test_google_antigravity_skills_lenient_eager_loading_and_disabled_isolation(tmp_path) -> None:
+    skills_dir = tmp_path / "bundle_skills"
+    alpha_dir = skills_dir / "alpha"
+    alpha_dir.mkdir(parents=True)
+    (alpha_dir / "SKILL.md").write_text("---\nname: \"alpha-custom\"\n---\nAlways follow alpha rules.\n", encoding="utf-8")
+    scripts_dir = alpha_dir / "scripts"
+    scripts_dir.mkdir()
+    helper_sh = scripts_dir / "helper.sh"
+    helper_sh.write_text("#!/bin/sh\necho helper\n", encoding="utf-8")
+    os.chmod(helper_sh, 0o755)
+
+    disabled_dir = skills_dir / "bad_skill"
+    disabled_dir.mkdir(parents=True)
+    (disabled_dir / "SKILL.md").write_text("---\nname: bad_skill\n---\nNever load me.\n", encoding="utf-8")
+
+    store_dir = tmp_path / "session-store"
+    backend = GoogleAntigravityBackend()
+    params = SessionOpenParams(
+        session_id="s-skills",
+        resume_session_id="",
+        model="gemini-2.5-pro",
+        profile="gemini-2.5-pro",
+        reasoning_effort="medium",
+        system_prompt="Base system prompt.",
+        working_directory="/workspace",
+        session_store_directory=str(store_dir),
+        permission_mode="approve_all",
+        harness_env={},
+        harness_options={},
+        host_tools=[],
+        available_tools_configured=False,
+        available_tools=[],
+        excluded_tools_configured=False,
+        excluded_tools=[],
+        skill_directories=[str(skills_dir), str(tmp_path / "missing_optional_dir")],
+        skills=["alpha", "bad_skill", "non_existent_skill"],
+        disabled_skills=["bad_skill"],
+        mcp_servers=[],
+    )
+
+    cfg = backend.build_agent_config(params, tool_callables=[], hooks=[])
+
+    # LocalHarness forbids combining inline_skills and skills_paths.
+    assert not cfg.inline_skills
+    assert cfg.skills_paths is not None and len(cfg.skills_paths) == 2
+
+    staged_dir = cfg.skills_paths[0]
+    assert staged_dir != str(skills_dir)
+    assert ".sofa-filtered-skills" in staged_dir
+    assert (os.path.isdir(os.path.join(staged_dir, "alpha")))
+    assert not os.path.exists(os.path.join(staged_dir, "bad_skill"))
+    assert cfg.skills_paths[1] == str(tmp_path / "missing_optional_dir")
+
+    staged_helper = os.path.join(staged_dir, "alpha", "scripts", "helper.sh")
+    assert os.path.isfile(staged_helper)
+    if os.name != "nt":
+        assert os.stat(staged_helper).st_mode & 0o111
+
+    sys_instr = cfg.system_instructions
+    assert isinstance(sys_instr, str)
+    assert sys_instr.startswith("Base system prompt.")
+    assert "Active Skill (alpha-custom)" in sys_instr
+    assert "Always follow alpha rules." in sys_instr
+    assert os.path.join(staged_dir, "alpha") in sys_instr
+    assert "Never load me." not in sys_instr
+    assert "bad_skill" not in sys_instr
+    assert "non_existent_skill" not in sys_instr
+
+
+async def test_google_antigravity_fallback_temp_stage_root_cleaned_up_on_close(tmp_path) -> None:
+    skills_dir = tmp_path / "bundle_skills"
+    (skills_dir / "keep").mkdir(parents=True)
+    (skills_dir / "keep" / "SKILL.md").write_text("# Keep\n", encoding="utf-8")
+    (skills_dir / "drop").mkdir(parents=True)
+    (skills_dir / "drop" / "SKILL.md").write_text("# Drop\n", encoding="utf-8")
+
+    fake_backend = ScriptedFakeBackend()
+    _, _, fake_sess = await fake_backend.open_session(
+        SessionOpenParams(
+            session_id="s-fake-cleanup",
+            resume_session_id="",
+            model="gemini-2.5-pro",
+            profile="gemini-2.5-pro",
+            reasoning_effort="",
+            system_prompt="",
+            working_directory="/workspace",
+            session_store_directory="",
+            permission_mode="approve_all",
+            harness_env={},
+            harness_options={},
+            host_tools=[],
+            available_tools_configured=False,
+            available_tools=[],
+            excluded_tools_configured=False,
+            excluded_tools=[],
+            skill_directories=[str(skills_dir)],
+            skills=["keep", "drop"],
+            disabled_skills=["drop"],
+            mcp_servers=[],
+        )
+    )
+    temp_root = getattr(fake_sess, "_temp_stage_root", None)
+    assert temp_root is not None and os.path.isdir(temp_root)
+    await fake_sess.close()
+    assert not os.path.exists(temp_root)
+
+    ag_backend = GoogleAntigravityBackend()
+    ag_sess = GoogleAntigravitySession(
+        ag_backend,
+        SessionOpenParams(
+            session_id="s-ag-cleanup",
+            resume_session_id="",
+            model="gemini-2.5-pro",
+            profile="gemini-2.5-pro",
+            reasoning_effort="",
+            system_prompt="",
+            working_directory="/workspace",
+            session_store_directory="",
+            permission_mode="approve_all",
+            harness_env={},
+            harness_options={},
+            host_tools=[],
+            available_tools_configured=False,
+            available_tools=[],
+            excluded_tools_configured=False,
+            excluded_tools=[],
+            skill_directories=[str(skills_dir)],
+            skills=["keep", "drop"],
+            disabled_skills=["drop"],
+            mcp_servers=[],
+        ),
+    )
+    _, ag_temp_root = ag_backend._build_agent_config_with_stage_root(ag_sess._params, tool_callables=[], hooks=[])
+    ag_sess._temp_stage_root = ag_temp_root
+    assert ag_temp_root is not None and os.path.isdir(ag_temp_root)
+    await ag_sess.close()
+    assert not os.path.exists(ag_temp_root)

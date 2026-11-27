@@ -1057,17 +1057,36 @@ func TestWorkerDaemon_BundleSingleflightReuseSHAMismatchAndMerge(t *testing.T) {
 	mReq := mergeReqs[0]
 	mu.Unlock()
 
-	assert.Equal(t, filepath.Join(extractRoot, "config"), byNode["worker.a"].BundleDir)
-	assert.Equal(t, filepath.Join(extractRoot, "modules", "sub"), byNode["module.sub.worker.b"].BundleDir)
-	assert.Equal(t, filepath.Join(extractRoot, "config"), byNode["worker.c"].BundleDir)
+	assert.Equal(t, extractRoot, byNode["worker.a"].BundleDir)
+	assert.Equal(t, extractRoot, byNode["module.sub.worker.b"].BundleDir)
+	assert.Equal(t, extractRoot, byNode["worker.c"].BundleDir)
 	assert.Equal(t, runtime.GOOS, byNode["worker.a"].HostOS)
 	assert.Equal(t, workerTempDir, byNode["worker.a"].TempRoot)
 	assert.Equal(t, workerPluginDir, byNode["worker.a"].PluginResolveOpts.PluginDir)
 	assert.Equal(t, wantLock, byNode["worker.a"].PluginResolveOpts.LockFile)
 
-	assert.Equal(t, filepath.Join(extractRoot, "config"), mReq.BundleDir)
+	assert.Equal(t, extractRoot, mReq.BundleDir)
 	assert.Equal(t, runtime.GOOS, mReq.HostOS)
 	assert.Equal(t, workerTempDir, mReq.TempRoot)
+
+	// Invalid bundle_path must still be rejected even though extractRoot is passed directly.
+	_, err = invokeFakeHandler[daemon.StartNodeRequest, daemon.StartNodeResponse](t, svc, "start_node", daemon.StartNodeRequest{
+		ProcessID:   "proc-bundle-1",
+		LeaseID:     "lease-bad-bp",
+		RunID:       "run-bundle-1",
+		NodeAddr:    "worker.bad_bp",
+		Epoch:       1,
+		RepoURL:     "https://example.com/repo.git",
+		PlanBlobKey: meta.Key,
+		PlanSHA256:  meta.SHA256,
+		BundlePath:  "../escape",
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return len(nodeRep.Reports()) == 4
+	}, 5*time.Second, 15*time.Millisecond)
+	assert.Equal(t, runner.StatusFailed, nodeRep.Reports()[3].Outcome.Status)
+	assert.Contains(t, nodeRep.Reports()[3].ErrMessage, "bundle_path")
 
 	// Task with mismatched SHA against existing marker must fail clearly without re-downloading.
 	_, err = invokeFakeHandler[daemon.StartNodeRequest, daemon.StartNodeResponse](t, svc, "start_node", daemon.StartNodeRequest{
@@ -1084,9 +1103,9 @@ func TestWorkerDaemon_BundleSingleflightReuseSHAMismatchAndMerge(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		return len(nodeRep.Reports()) == 4
+		return len(nodeRep.Reports()) == 5
 	}, 5*time.Second, 15*time.Millisecond)
-	badReport := nodeRep.Reports()[3]
+	badReport := nodeRep.Reports()[4]
 	assert.Equal(t, runner.StatusFailed, badReport.Outcome.Status)
 	assert.NotEmpty(t, badReport.ErrMessage)
 	assert.Equal(t, int32(1), store.getCalls.Load())
@@ -1105,10 +1124,10 @@ func TestWorkerDaemon_BundleSingleflightReuseSHAMismatchAndMerge(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return len(nodeRep.Reports()) == 5
+		return len(nodeRep.Reports()) == 6
 	}, 5*time.Second, 15*time.Millisecond)
-	assert.Equal(t, runner.StatusFailed, nodeRep.Reports()[4].Outcome.Status)
-	assert.NotEmpty(t, nodeRep.Reports()[4].ErrMessage)
+	assert.Equal(t, runner.StatusFailed, nodeRep.Reports()[5].Outcome.Status)
+	assert.NotEmpty(t, nodeRep.Reports()[5].ErrMessage)
 	_, freshBadStat := os.Stat(filepath.Join(workerTempDir, "bundles", "run-bundle-bad-fresh"))
 	assert.ErrorIs(t, freshBadStat, os.ErrNotExist)
 }

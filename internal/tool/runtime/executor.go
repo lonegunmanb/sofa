@@ -343,7 +343,8 @@ func (e *Executor) Invoke(ctx context.Context, binding ToolBinding, argumentsJSO
 			return failureResult(fmt.Sprintf("external_tool %s program is empty", binding.EffectiveName())), nil
 		}
 
-		stdout, stderr, exitCode, execErr := e.execFn(execCtx, workDir, binding.Spec.Program, env, canonicalInputJSON)
+		cmd := sandboxruntime.RelocateBundleCommandArgs(binding.Spec.Program, e.bundleDir, e.workspaceDir)
+		stdout, stderr, exitCode, execErr := e.execFn(execCtx, workDir, cmd, env, canonicalInputJSON)
 		if execErr != nil {
 			return failureResult(redactSecrets(fmt.Sprintf("external_tool %s execution error: %v (%s)", binding.EffectiveName(), execErr, strings.TrimSpace(stderr)), secrets)), nil
 		}

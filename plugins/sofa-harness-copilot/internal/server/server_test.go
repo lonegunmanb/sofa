@@ -380,6 +380,74 @@ func TestOpenSessionProviderAndConfigMapping(t *testing.T) {
 		assert.Empty(t, fc.createConfigs[0].Agent)
 	})
 
+	t.Run("disabled_skills strips matching skills from CustomAgents and omits agent when empty", func(t *testing.T) {
+		t.Parallel()
+		fc := &fakeSDKClient{}
+		srv := New(
+			WithLookPath(func(string) (string, error) { return "/bin/copilot", nil }),
+			WithClientFactory(func(string, []string) (sdkClient, error) { return fc, nil }),
+		)
+
+		resp1, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:      "sess-disabled-partial",
+			Model:          "gpt-5.4",
+			Skills:         []string{"go-tdd", "deprecated", " go-tdd "},
+			DisabledSkills: []string{"deprecated"},
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp1.GetError())
+
+		resp2, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:      "sess-disabled-all",
+			Model:          "gpt-5.4",
+			Skills:         []string{"deprecated"},
+			DisabledSkills: []string{"deprecated"},
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp2.GetError())
+
+		require.Len(t, fc.createConfigs, 2)
+		assert.Equal(t, "sofa_worker", fc.createConfigs[0].Agent)
+		require.Len(t, fc.createConfigs[0].CustomAgents, 1)
+		assert.Equal(t, []string{"go-tdd"}, fc.createConfigs[0].CustomAgents[0].Skills)
+
+		assert.Empty(t, fc.createConfigs[1].Agent)
+		assert.Empty(t, fc.createConfigs[1].CustomAgents)
+	})
+
+	t.Run("leniently filters skills against existing skill_directories on disk and normalizes frontmatter names", func(t *testing.T) {
+		t.Parallel()
+		skillsDir := t.TempDir()
+		alphaDir := filepath.Join(skillsDir, "alpha")
+		require.NoError(t, os.MkdirAll(alphaDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(alphaDir, "SKILL.md"), []byte("---\nname: \"alpha-custom\"\n---\n# Alpha\n"), 0o644))
+
+		disabledDir := filepath.Join(skillsDir, "bad_skill")
+		require.NoError(t, os.MkdirAll(disabledDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(disabledDir, "SKILL.md"), []byte("---\nname: bad_skill\n---\n# Bad\n"), 0o644))
+
+		fc := &fakeSDKClient{}
+		srv := New(
+			WithLookPath(func(string) (string, error) { return "/bin/copilot", nil }),
+			WithClientFactory(func(string, []string) (sdkClient, error) { return fc, nil }),
+		)
+
+		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:        "sess-lenient-disk",
+			Model:            "gpt-5.4",
+			SkillDirectories: []string{skillsDir},
+			Skills:           []string{"alpha", "bad_skill", "missing_skill"},
+			DisabledSkills:   []string{"bad_skill"},
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetError())
+
+		require.Len(t, fc.createConfigs, 1)
+		assert.Equal(t, "sofa_worker", fc.createConfigs[0].Agent)
+		require.Len(t, fc.createConfigs[0].CustomAgents, 1)
+		assert.Equal(t, []string{"alpha-custom"}, fc.createConfigs[0].CustomAgents[0].Skills)
+	})
+
 	t.Run("unsupported provider type returns ERROR_CATEGORY_UNSUPPORTED_CAPABILITY", func(t *testing.T) {
 		t.Parallel()
 		fc := &fakeSDKClient{}

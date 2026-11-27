@@ -126,6 +126,7 @@ func TestBuildRunArgsMatrixAndGuards(t *testing.T) {
 	ws := newFakeGitDir(t)
 	userMountDir := t.TempDir()
 	bundleDir := t.TempDir()
+	skillsDir := t.TempDir()
 	importsDir := t.TempDir()
 	artifactsDir := t.TempDir()
 	toolsDir := t.TempDir()
@@ -160,6 +161,7 @@ func TestBuildRunArgsMatrixAndGuards(t *testing.T) {
 		ReadOnlyWorkspace: false,
 		WritablePaths:     []string{"docs/spec.md", "internal/**"},
 		BundleDir:         bundleDir,
+		SkillsDir:         skillsDir,
 		ImportsDir:        importsDir,
 		ArtifactsDir:      artifactsDir,
 		ToolsDir:          toolsDir,
@@ -195,6 +197,7 @@ func TestBuildRunArgsMatrixAndGuards(t *testing.T) {
 	assert.Equal(t, filepath.Join(ws, ".git")+":/workspace/.git:ro", mounts[len(mounts)-1], "/workspace/.git:ro must be final mount")
 	assert.Contains(t, mounts, userMountDir+":/opt/cache:ro")
 	assert.Contains(t, mounts, bundleDir+":/.sofa/bundle:ro")
+	assert.Contains(t, mounts, skillsDir+":/.sofa/skills:ro")
 	assert.Contains(t, mounts, importsDir+":/.sofa/imports:ro")
 	assert.Contains(t, mounts, artifactsDir+":/.sofa/artifacts:rw")
 	assert.Contains(t, mounts, toolsDir+":/.sofa/tools:ro")
@@ -475,6 +478,68 @@ func TestPodmanEngineRunGatekeepersSnapshotAndRestore(t *testing.T) {
 	gotClean, err := os.ReadFile(filepath.Join(ws, "clean.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "clean-head\n", string(gotClean))
+}
+
+func TestPodmanEngineRunGatekeepersRelocatesBundleScripts(t *testing.T) {
+	t.Parallel()
+
+	ws := newFakeGitDir(t)
+	bundleDir := t.TempDir()
+
+	// config/check.sh exists ONLY in bundleDir -> must relocate to /.sofa/bundle/config/check.sh.
+	require.NoError(t, os.MkdirAll(filepath.Join(bundleDir, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "config", "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	// modules/sub/check.sh exists ONLY in bundleDir -> must relocate to /.sofa/bundle/modules/sub/check.sh.
+	require.NoError(t, os.MkdirAll(filepath.Join(bundleDir, "modules", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "modules", "sub", "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	// config/ws_check.sh exists in BOTH bundleDir and workspace -> must NOT shadow workspace file!
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "config", "ws_check.sh"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "config"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "config", "ws_check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	runner := &scriptedCmdRunner{}
+	eng := runtime.NewPodmanEngine(runtime.PodmanEngineOptions{Runner: runner})
+
+	failure, err := eng.RunGatekeepers(t.Context(), runtime.GatekeeperRunSpec{
+		Sandbox:          sandboxspec.SandboxConfig{Runtime: "podman", Image: "alpine:latest", Network: "none"},
+		HostWorkspaceDir: ws,
+		BundleDir:        bundleDir,
+		HostOS:           "linux",
+	}, []workerspec.GatekeeperConfig{
+		{
+			Name:       "bundle_sh",
+			Command:    []string{"sh", "config/check.sh"},
+			WorkingDir: ".",
+			Timeout:    "10s",
+		},
+		{
+			Name:       "mod_direct",
+			Command:    []string{"modules/sub/check.sh", "--strict"},
+			WorkingDir: ".",
+			Timeout:    "10s",
+		},
+		{
+			Name:       "workspace_precedence",
+			Command:    []string{"sh", "config/ws_check.sh"},
+			WorkingDir: ".",
+			Timeout:    "10s",
+		},
+	})
+	require.NoError(t, err)
+	require.Nil(t, failure)
+	require.Len(t, runner.recorded, 3)
+
+	// 1. sh config/check.sh -> --entrypoint sh ... /.sofa/bundle/config/check.sh
+	assertFlagPair(t, runner.recorded[0].args, "--entrypoint", "sh")
+	assert.Equal(t, []string{"alpine:latest", "/.sofa/bundle/config/check.sh"}, runner.recorded[0].args[len(runner.recorded[0].args)-2:])
+
+	// 2. modules/sub/check.sh --strict -> --entrypoint /.sofa/bundle/modules/sub/check.sh ... --strict
+	assertFlagPair(t, runner.recorded[1].args, "--entrypoint", "/.sofa/bundle/modules/sub/check.sh")
+	assert.Equal(t, []string{"alpine:latest", "--strict"}, runner.recorded[1].args[len(runner.recorded[1].args)-2:])
+
+	// 3. sh config/ws_check.sh -> NOT relocated because /workspace/config/ws_check.sh exists
+	assertFlagPair(t, runner.recorded[2].args, "--entrypoint", "sh")
+	assert.Equal(t, []string{"alpine:latest", "config/ws_check.sh"}, runner.recorded[2].args[len(runner.recorded[2].args)-2:])
 }
 
 func newFakeGitDir(t *testing.T) string {
