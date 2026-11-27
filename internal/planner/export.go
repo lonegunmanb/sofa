@@ -282,7 +282,7 @@ func (c *SofaConfig) exportNode(
 			CanonicalAddress: canonical,
 			Kind:             "worker",
 			Dependencies:     deps,
-			Config:           encodeWorkerConfig(b.WorkerConfig()),
+			Config:           encodeWorkerConfig(b.WorkerConfig(), blockEachValue(b)),
 			Origin:           origin,
 		}, nil
 	case *workerspec.DynamicWorkerBlock:
@@ -300,7 +300,7 @@ func (c *SofaConfig) exportNode(
 			CanonicalAddress: canonical,
 			Kind:             "merge",
 			Dependencies:     deps,
-			Config:           encodeMergeConfig(b.MergeConfig()),
+			Config:           encodeMergeConfig(b.MergeConfig(), blockEachValue(b)),
 			Origin:           origin,
 		}, nil
 	case *modulespec.ModuleBlock:
@@ -321,7 +321,7 @@ func (c *SofaConfig) exportNode(
 			CanonicalAddress: canonical,
 			Kind:             "module",
 			Dependencies:     deps,
-			Config:           encodeModuleNodeConfig(mp),
+			Config:           encodeModuleNodeConfig(mp, blockEachValue(b)),
 			Module: &plan.ModuleSpec{
 				Plan:                childPlan,
 				Source:              mp.Source,
@@ -632,7 +632,24 @@ func encodeExternalToolConfig(cfg toolspec.ExternalToolConfig) cty.Value {
 	})
 }
 
-func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
+func blockEachValue(block golden.Block) cty.Value {
+	if block == nil {
+		return cty.NullVal(cty.EmptyObject)
+	}
+	for ctx := block.EvalContext(); ctx != nil; ctx = ctx.Parent() {
+		if ctx.Variables != nil {
+			if eachVal, ok := ctx.Variables["each"]; ok && eachVal != cty.NilVal {
+				return eachVal
+			}
+		}
+	}
+	return cty.NullVal(cty.EmptyObject)
+}
+
+func encodeWorkerConfig(cfg workerspec.Config, eachVal cty.Value) cty.Value {
+	if eachVal == cty.NilVal {
+		eachVal = cty.NullVal(cty.EmptyObject)
+	}
 	promptVal := cfg.Prompt
 	if promptVal == cty.NilVal {
 		promptVal = cty.NullVal(cty.String)
@@ -798,6 +815,7 @@ func encodeWorkerConfig(cfg workerspec.Config) cty.Value {
 		"qc":                      qcVal,
 		"fallbacks":               fallbacksVal,
 		"deferred_expression":     cty.StringVal(cfg.DeferredExpression),
+		"each":                    eachVal,
 	})
 }
 
@@ -813,12 +831,15 @@ func encodeDynamicWorkerConfig(cfg workerspec.DynamicConfig) cty.Value {
 		"for_each":         forEachVal,
 		"for_each_expr":    cty.StringVal(cfg.ForEachExpr),
 		"iterator":         cty.StringVal(cfg.IteratorName),
-		"content":          encodeWorkerConfig(cfg.Content),
+		"content":          encodeWorkerConfig(cfg.Content, cty.NullVal(cty.EmptyObject)),
 		"content_template": cty.StringVal(cfg.ContentTemplate),
 	})
 }
 
-func encodeMergeConfig(cfg mergespec.Config) cty.Value {
+func encodeMergeConfig(cfg mergespec.Config, eachVal cty.Value) cty.Value {
+	if eachVal == cty.NilVal {
+		eachVal = cty.NullVal(cty.EmptyObject)
+	}
 	sandboxVal := cfg.Sandbox
 	if sandboxVal == cty.NilVal {
 		sandboxVal = cty.NullVal(cty.EmptyObject)
@@ -836,10 +857,14 @@ func encodeMergeConfig(cfg mergespec.Config) cty.Value {
 		"human_approval":    cty.StringVal(cfg.HumanApproval),
 		"sandbox":           sandboxVal,
 		"gatekeepers":       encodeGatekeepers(cfg.Gatekeepers),
+		"each":              eachVal,
 	})
 }
 
-func encodeModuleNodeConfig(mp modulespec.ModulePlan) cty.Value {
+func encodeModuleNodeConfig(mp modulespec.ModulePlan, eachVal cty.Value) cty.Value {
+	if eachVal == cty.NilVal {
+		eachVal = cty.NullVal(cty.EmptyObject)
+	}
 	inputs := cty.EmptyObjectVal
 	if len(mp.Inputs) > 0 {
 		inputs = cty.ObjectVal(mp.Inputs)
@@ -852,6 +877,7 @@ func encodeModuleNodeConfig(mp modulespec.ModulePlan) cty.Value {
 		"timeout_raw":       cty.StringVal(mp.TimeoutRaw),
 		"inputs":            inputs,
 		"input_exprs":       stringMapVal(mp.InputExprs),
+		"each":              eachVal,
 	})
 }
 
