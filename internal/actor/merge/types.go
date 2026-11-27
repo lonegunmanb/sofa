@@ -105,10 +105,10 @@ type CandidateTicket struct {
 	RequiredArch       string                        `json:"required_arch,omitempty"`
 	Sandbox            sandboxspec.SandboxConfig     `json:"sandbox"`
 	Gatekeepers        []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
-	BundleDir          string                        `json:"bundle_dir,omitempty"`
+	PlanBlobKey        string                        `json:"plan_blob_key,omitempty"`
+	PlanSHA256         string                        `json:"plan_sha256,omitempty"`
+	BundlePath         string                        `json:"bundle_path,omitempty"`
 	ImportsDir         string                        `json:"imports_dir,omitempty"`
-	HostOS             string                        `json:"host_os,omitempty"`
-	TempRoot           string                        `json:"temp_root,omitempty"`
 	Status             TicketStatus                  `json:"status"`
 	Attempt            uint64                        `json:"attempt,omitempty"`
 	LeaseID            string                        `json:"lease_id,omitempty"`
@@ -202,10 +202,10 @@ type EnqueueCandidateReq struct {
 	RequiredArch        string                        `json:"required_arch,omitempty"`
 	Sandbox             sandboxspec.SandboxConfig     `json:"sandbox"`
 	Gatekeepers         []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
-	BundleDir           string                        `json:"bundle_dir,omitempty"`
+	PlanBlobKey         string                        `json:"plan_blob_key,omitempty"`
+	PlanSHA256          string                        `json:"plan_sha256,omitempty"`
+	BundlePath          string                        `json:"bundle_path,omitempty"`
 	ImportsDir          string                        `json:"imports_dir,omitempty"`
-	HostOS              string                        `json:"host_os,omitempty"`
-	TempRoot            string                        `json:"temp_root,omitempty"`
 }
 
 // EnqueueCandidateResp confirms queue acceptance and reports deduplication status.

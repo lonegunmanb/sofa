@@ -16,16 +16,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/lonegunmanb/sofa/internal/blob"
 	harnessinstaller "github.com/lonegunmanb/sofa/internal/harness/installer"
-	"github.com/lonegunmanb/sofa/internal/worker/daemon"
 )
 
 // RunStartDefaults provides server-level defaults applied when invoking RunActor.StartRun.
 type RunStartDefaults struct {
 	RequiredArch          string
-	HostOS                string
 	TargetPlatform        *harnessinstaller.Platform
-	PluginResolve         daemon.PluginResolveConfig
-	TempRoot              string
 	MaxGatekeeperReworks  int
 	MaxArtifactReworks    int
 	StallTimeout          time.Duration

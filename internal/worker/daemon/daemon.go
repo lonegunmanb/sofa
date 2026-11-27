@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,6 +39,7 @@ import (
 	toolruntime "github.com/lonegunmanb/sofa/internal/tool/runtime"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
 	workerspec "github.com/lonegunmanb/sofa/internal/worker/spec"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -45,6 +49,8 @@ const (
 	EventsTopic = "sofa-events"
 	// DefaultMaxLogBufferBytes bounds the per-task local JSONL spool file before capping writes.
 	DefaultMaxLogBufferBytes int64 = 16 * 1024 * 1024
+	bundleMarkerFile               = ".bundle-ready.json"
+	cleanupAbortGraceTimeout       = 1500 * time.Millisecond
 )
 
 // RegistryClient abstracts ProcessRegistryActor calls made by WorkerDaemon.
@@ -116,10 +122,6 @@ type PingResponse = registry.PingResponse
 
 // PluginResolveConfig carries JSON-serializable harness plugin resolution settings over Dapr RPC.
 type PluginResolveConfig struct {
-	PluginDir          string                 `json:"plugin_dir,omitempty"`
-	WorkingDir         string                 `json:"working_dir,omitempty"`
-	UserHomeDir        string                 `json:"user_home_dir,omitempty"`
-	CacheRoot          string                 `json:"cache_root,omitempty"`
 	LockFile           harness.PluginLockFile `json:"lock_file,omitempty"`
 	MaxSingleFileBytes int64                  `json:"max_single_file_bytes,omitempty"`
 	MaxTotalBytes      int64                  `json:"max_total_bytes,omitempty"`
@@ -151,9 +153,9 @@ type StartNodeRequest struct {
 	ToolEnvs              map[string]runner.ExternalToolEnvConfig `json:"tool_envs,omitempty"`
 	Imports               []artifact.ImportRequest                `json:"imports,omitempty"`
 	ResolvedEnv           map[string]string                       `json:"resolved_env,omitempty"`
-	BundleDir             string                                  `json:"bundle_dir,omitempty"`
-	TempRoot              string                                  `json:"temp_root,omitempty"`
-	HostOS                string                                  `json:"host_os,omitempty"`
+	PlanBlobKey           string                                  `json:"plan_blob_key,omitempty"`
+	PlanSHA256            string                                  `json:"plan_sha256,omitempty"`
+	BundlePath            string                                  `json:"bundle_path,omitempty"`
 	TargetPlatform        *harnessinstaller.Platform              `json:"target_platform,omitempty"`
 	PluginResolve         PluginResolveConfig                     `json:"plugin_resolve,omitempty"`
 	MaxGatekeeperReworks  int                                     `json:"max_gatekeeper_reworks,omitempty"`
@@ -210,10 +212,10 @@ type RunMergeCandidateRequest struct {
 	ResolvedEnv     map[string]string             `json:"resolved_env,omitempty"`
 	Sandbox         sandboxspec.SandboxConfig     `json:"sandbox"`
 	Gatekeepers     []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
-	BundleDir       string                        `json:"bundle_dir,omitempty"`
+	PlanBlobKey     string                        `json:"plan_blob_key,omitempty"`
+	PlanSHA256      string                        `json:"plan_sha256,omitempty"`
+	BundlePath      string                        `json:"bundle_path,omitempty"`
 	ImportsDir      string                        `json:"imports_dir,omitempty"`
-	HostOS          string                        `json:"host_os,omitempty"`
-	TempRoot        string                        `json:"temp_root,omitempty"`
 }
 
 // RunMergeCandidateResponse acknowledges asynchronous acceptance of a merge candidate execution.
@@ -221,6 +223,17 @@ type RunMergeCandidateResponse struct {
 	Accepted       bool   `json:"accepted"`
 	AlreadyRunning bool   `json:"already_running,omitempty"`
 	ProcessID      string `json:"process_id"`
+}
+
+// CleanupRunRequest requests removal of a run's worker-local extracted bundle directory.
+type CleanupRunRequest struct {
+	RunID string `json:"run_id"`
+}
+
+// CleanupRunResponse reports whether the run's extracted bundle directory was removed or busy.
+type CleanupRunResponse struct {
+	Removed bool `json:"removed"`
+	Busy    bool `json:"busy,omitempty"`
 }
 
 // LogEvent is the structured JSONL schema published to Dapr PubSub and archived to BlobStore.
@@ -268,7 +281,14 @@ type Options struct {
 }
 
 type activeTask struct {
+	runID      string
 	cancel     context.CancelFunc
+	generation uint64
+	aborted    *atomic.Bool
+}
+
+type liveRunTask struct {
+	runID      string
 	generation uint64
 	aborted    *atomic.Bool
 }
@@ -282,12 +302,19 @@ type WorkerDaemon struct {
 	maxLogBufferBytes int64
 	heartbeatInterval time.Duration
 
-	mu         sync.Mutex
-	processID  string
-	appID      string
-	generation uint64
-	nodeTasks  map[string]activeTask
-	mergeTasks map[string]activeTask
+	mu          sync.Mutex
+	processID   string
+	appID       string
+	generation  uint64
+	nodeTasks   map[string]activeTask
+	mergeTasks  map[string]activeTask
+	nextTaskSeq uint64
+	liveTasks   map[uint64]liveRunTask
+	liveTaskCh  chan struct{}
+
+	bundleSF     singleflight.Group
+	bundleLockMu sync.Mutex
+	bundleLocks  map[string]*sync.Mutex
 
 	loopCancel context.CancelFunc
 	loopDone   chan struct{}
@@ -370,6 +397,9 @@ func New(opts Options) (*WorkerDaemon, error) {
 		generation:        1,
 		nodeTasks:         make(map[string]activeTask),
 		mergeTasks:        make(map[string]activeTask),
+		liveTasks:         make(map[uint64]liveRunTask),
+		liveTaskCh:        make(chan struct{}),
+		bundleLocks:       make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -394,7 +424,7 @@ func (d *WorkerDaemon) ActiveTaskCount() int {
 	return len(d.nodeTasks) + len(d.mergeTasks)
 }
 
-// RegisterHandlers mounts ping, start_node, abort_node, run_merge_candidate, and abort_merge onto svc.
+// RegisterHandlers mounts ping, start_node, abort_node, run_merge_candidate, abort_merge, and cleanup_run onto svc.
 func (d *WorkerDaemon) RegisterHandlers(svc common.Service) error {
 	if svc == nil {
 		return errors.New("daemon: Dapr service is required")
@@ -405,6 +435,7 @@ func (d *WorkerDaemon) RegisterHandlers(svc common.Service) error {
 		"abort_node":          d.handleAbortNodeInvocation,
 		"run_merge_candidate": d.handleRunMergeInvocation,
 		"abort_merge":         d.handleAbortMergeInvocation,
+		"cleanup_run":         d.handleCleanupRunInvocation,
 	}
 	for route, handler := range routes {
 		if err := svc.AddServiceInvocationHandler(route, handler); err != nil {
@@ -619,11 +650,12 @@ func (d *WorkerDaemon) handleStartNodeInvocation(_ context.Context, in *common.I
 	}
 	taskCtx, cancel := context.WithCancel(context.Background())
 	abortedFlag := &atomic.Bool{}
-	d.nodeTasks[key] = activeTask{cancel: cancel, generation: gen, aborted: abortedFlag}
+	d.nodeTasks[key] = activeTask{runID: req.RunID, cancel: cancel, generation: gen, aborted: abortedFlag}
+	seq := d.registerLiveTaskLocked(req.RunID, gen, abortedFlag)
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	go d.runNodeTask(taskCtx, cancel, key, pid, gen, abortedFlag, req)
+	go d.runNodeTask(taskCtx, cancel, key, seq, pid, gen, abortedFlag, req)
 
 	return marshalInvocationContent(StartNodeResponse{
 		Accepted:  true,
@@ -635,12 +667,14 @@ func (d *WorkerDaemon) runNodeTask(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	taskKey string,
+	taskSeq uint64,
 	processID string,
 	generation uint64,
 	abortedFlag *atomic.Bool,
 	req StartNodeRequest,
 ) {
 	defer d.wg.Done()
+	defer d.removeLiveTask(taskSeq)
 	defer cancel()
 	defer d.removeNodeTask(taskKey, generation)
 
@@ -660,62 +694,73 @@ func (d *WorkerDaemon) runNodeTask(
 	})
 	defer pipeline.FlushAndClose()
 
-	isolatedLookup := makeIsolatedLookupEnv(req.ResolvedEnv)
-	tempRoot := strings.TrimSpace(req.TempRoot)
-	if tempRoot == "" {
-		tempRoot = strings.TrimSpace(d.opts.TempDir)
-	}
-	pluginDir := strings.TrimSpace(req.PluginResolve.PluginDir)
-	if pluginDir == "" {
-		pluginDir = strings.TrimSpace(d.opts.PluginDir)
-	}
+	var (
+		outcome runner.NodeOutcome
+		execErr error
+	)
 
-	execReq := runner.NodeExecutionRequest{
-		RunID:          req.RunID,
-		NodeAddr:       req.NodeAddr,
-		Epoch:          req.Epoch,
-		RepoURL:        req.RepoURL,
-		BasedSource:    req.BasedSource,
-		BaseSHA:        req.BaseSHA,
-		Auth:           req.Auth,
-		Worker:         req.Worker,
-		SystemPrompt:   req.SystemPrompt,
-		Prompt:         req.Prompt,
-		QCPrompt:       req.QCPrompt,
-		Sandboxes:      req.Sandboxes,
-		Harnesses:      req.Harnesses,
-		ModelProviders: req.ModelProviders,
-		MCPServers:     req.MCPServers,
-		MCPResources:   req.MCPResources,
-		Tools:          req.Tools,
-		ToolEnvs:       req.ToolEnvs,
-		Imports:        req.Imports,
-		BundleDir:      req.BundleDir,
-		TempRoot:       tempRoot,
-		HostOS:         req.HostOS,
-		TargetPlatform: req.TargetPlatform,
-		PluginResolveOpts: harnessinstaller.ResolveOptions{
-			PluginDir:          pluginDir,
-			WorkingDir:         req.PluginResolve.WorkingDir,
-			UserHomeDir:        req.PluginResolve.UserHomeDir,
-			CacheRoot:          req.PluginResolve.CacheRoot,
-			LockFile:           req.PluginResolve.LockFile,
-			LookupEnv:          isolatedLookup,
-			MaxSingleFileBytes: req.PluginResolve.MaxSingleFileBytes,
-			MaxTotalBytes:      req.PluginResolve.MaxTotalBytes,
-			MaxEntries:         req.PluginResolve.MaxEntries,
-		},
-		LookupEnv:             isolatedLookup,
-		MaxGatekeeperReworks:  req.MaxGatekeeperReworks,
-		MaxArtifactReworks:    req.MaxArtifactReworks,
-		StallTimeout:          req.StallTimeout,
-		WatchdogCheckInterval: req.WatchdogCheckInterval,
-		OnEvent: func(ev harnessruntime.Event) {
-			pipeline.Emit(ev)
-		},
+	bundleInfo, bundleErr := d.ensureRunBundleExtracted(ctx, req.RunID, req.PlanBlobKey, req.PlanSHA256)
+	var bundleDir string
+	if bundleErr == nil {
+		bundleDir, bundleErr = bundleDirForExtract(bundleInfo.ExtractDir, req.BundlePath)
 	}
+	if bundleErr != nil {
+		outcome = runner.NodeOutcome{
+			Status:        runner.StatusFailed,
+			FailureReason: bundleErr.Error(),
+		}
+		execErr = bundleErr
+	} else {
+		isolatedLookup := makeIsolatedLookupEnv(req.ResolvedEnv)
+		lockFile := req.PluginResolve.LockFile
+		if strings.TrimSpace(req.PlanBlobKey) != "" {
+			lockFile = bundleInfo.PluginLock
+		}
 
-	outcome, execErr := d.opts.NodeExecutor.ExecuteNode(ctx, execReq)
+		execReq := runner.NodeExecutionRequest{
+			RunID:          req.RunID,
+			NodeAddr:       req.NodeAddr,
+			Epoch:          req.Epoch,
+			RepoURL:        req.RepoURL,
+			BasedSource:    req.BasedSource,
+			BaseSHA:        req.BaseSHA,
+			Auth:           req.Auth,
+			Worker:         req.Worker,
+			SystemPrompt:   req.SystemPrompt,
+			Prompt:         req.Prompt,
+			QCPrompt:       req.QCPrompt,
+			Sandboxes:      req.Sandboxes,
+			Harnesses:      req.Harnesses,
+			ModelProviders: req.ModelProviders,
+			MCPServers:     req.MCPServers,
+			MCPResources:   req.MCPResources,
+			Tools:          req.Tools,
+			ToolEnvs:       req.ToolEnvs,
+			Imports:        req.Imports,
+			BundleDir:      bundleDir,
+			TempRoot:       strings.TrimSpace(d.opts.TempDir),
+			HostOS:         runtime.GOOS,
+			TargetPlatform: req.TargetPlatform,
+			PluginResolveOpts: harnessinstaller.ResolveOptions{
+				PluginDir:          strings.TrimSpace(d.opts.PluginDir),
+				LockFile:           lockFile,
+				LookupEnv:          isolatedLookup,
+				MaxSingleFileBytes: req.PluginResolve.MaxSingleFileBytes,
+				MaxTotalBytes:      req.PluginResolve.MaxTotalBytes,
+				MaxEntries:         req.PluginResolve.MaxEntries,
+			},
+			LookupEnv:             isolatedLookup,
+			MaxGatekeeperReworks:  req.MaxGatekeeperReworks,
+			MaxArtifactReworks:    req.MaxArtifactReworks,
+			StallTimeout:          req.StallTimeout,
+			WatchdogCheckInterval: req.WatchdogCheckInterval,
+			OnEvent: func(ev harnessruntime.Event) {
+				pipeline.Emit(ev)
+			},
+		}
+
+		outcome, execErr = d.opts.NodeExecutor.ExecuteNode(ctx, execReq)
+	}
 	pipeline.FlushAndClose()
 
 	if !d.isGenerationCurrent(generation) {
@@ -835,11 +880,12 @@ func (d *WorkerDaemon) handleRunMergeInvocation(_ context.Context, in *common.In
 	}
 	taskCtx, cancel := context.WithCancel(context.Background())
 	abortedFlag := &atomic.Bool{}
-	d.mergeTasks[req.RequestID] = activeTask{cancel: cancel, generation: gen, aborted: abortedFlag}
+	d.mergeTasks[req.RequestID] = activeTask{runID: req.RunID, cancel: cancel, generation: gen, aborted: abortedFlag}
+	seq := d.registerLiveTaskLocked(req.RunID, gen, abortedFlag)
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	go d.runMergeTask(taskCtx, cancel, req.RequestID, pid, gen, abortedFlag, req)
+	go d.runMergeTask(taskCtx, cancel, req.RequestID, seq, pid, gen, abortedFlag, req)
 
 	return marshalInvocationContent(RunMergeCandidateResponse{
 		Accepted:  true,
@@ -851,48 +897,59 @@ func (d *WorkerDaemon) runMergeTask(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	requestID string,
+	taskSeq uint64,
 	processID string,
 	generation uint64,
 	abortedFlag *atomic.Bool,
 	req RunMergeCandidateRequest,
 ) {
 	defer d.wg.Done()
+	defer d.removeLiveTask(taskSeq)
 	defer cancel()
 	defer d.removeMergeTask(requestID, generation)
 
-	gitAdapter := d.opts.GitAdapter
-	if gitAdapter == nil {
-		gitAdapter = git.NewCLIAdapter(git.CLIAdapterOptions{
-			LookupEnv: makeIsolatedLookupEnv(req.ResolvedEnv),
-		})
-	}
+	var (
+		res     runner.MergeCandidateResult
+		execErr error
+	)
 
-	tempRoot := strings.TrimSpace(req.TempRoot)
-	if tempRoot == "" {
-		tempRoot = strings.TrimSpace(d.opts.TempDir)
+	bundleInfo, bundleErr := d.ensureRunBundleExtracted(ctx, req.RunID, req.PlanBlobKey, req.PlanSHA256)
+	var bundleDir string
+	if bundleErr == nil {
+		bundleDir, bundleErr = bundleDirForExtract(bundleInfo.ExtractDir, req.BundlePath)
 	}
+	if bundleErr != nil {
+		execErr = bundleErr
+	} else {
+		gitAdapter := d.opts.GitAdapter
+		if gitAdapter == nil {
+			gitAdapter = git.NewCLIAdapter(git.CLIAdapterOptions{
+				LookupEnv: makeIsolatedLookupEnv(req.ResolvedEnv),
+			})
+		}
 
-	mergeReq := runner.MergeCandidateRequest{
-		RunID:           req.RunID,
-		MergeNodeAddr:   req.MergeNodeAddr,
-		Epoch:           req.Epoch,
-		RepoURL:         req.RepoURL,
-		BasedSource:     req.BasedSource,
-		BaseSHA:         req.BaseSHA,
-		TargetBranch:    req.TargetBranch,
-		CandidateBranch: req.CandidateBranch,
-		Auth:            req.Auth,
-		Sandbox:         req.Sandbox,
-		Gatekeepers:     req.Gatekeepers,
-		GitAdapter:      gitAdapter,
-		SandboxEngine:   d.opts.SandboxEngine,
-		BundleDir:       req.BundleDir,
-		ImportsDir:      req.ImportsDir,
-		HostOS:          req.HostOS,
-		TempRoot:        tempRoot,
+		mergeReq := runner.MergeCandidateRequest{
+			RunID:           req.RunID,
+			MergeNodeAddr:   req.MergeNodeAddr,
+			Epoch:           req.Epoch,
+			RepoURL:         req.RepoURL,
+			BasedSource:     req.BasedSource,
+			BaseSHA:         req.BaseSHA,
+			TargetBranch:    req.TargetBranch,
+			CandidateBranch: req.CandidateBranch,
+			Auth:            req.Auth,
+			Sandbox:         req.Sandbox,
+			Gatekeepers:     req.Gatekeepers,
+			GitAdapter:      gitAdapter,
+			SandboxEngine:   d.opts.SandboxEngine,
+			BundleDir:       bundleDir,
+			ImportsDir:      req.ImportsDir,
+			HostOS:          runtime.GOOS,
+			TempRoot:        strings.TrimSpace(d.opts.TempDir),
+		}
+
+		res, execErr = d.opts.MergeExecutor.ExecuteMergeCandidate(ctx, mergeReq)
 	}
-
-	res, execErr := d.opts.MergeExecutor.ExecuteMergeCandidate(ctx, mergeReq)
 	if !d.isGenerationCurrent(generation) {
 		return
 	}
@@ -1074,6 +1131,9 @@ type nodeLogPipeline struct {
 func newNodeLogPipeline(cfg logPipelineConfig) *nodeLogPipeline {
 	p := &nodeLogPipeline{cfg: cfg}
 	if cfg.BlobStore != nil {
+		if strings.TrimSpace(cfg.TempDir) != "" {
+			_ = os.MkdirAll(cfg.TempDir, 0o755)
+		}
 		f, err := os.CreateTemp(cfg.TempDir, "sofa-node-log-*.jsonl")
 		if err == nil {
 			if rerr := restrictLogFile(f.Name(), f); rerr != nil {
@@ -1270,4 +1330,346 @@ func NewDaprPubSubPublisher(client daprclient.Client) PubSubPublisher {
 
 func (p *daprPubSubPublisher) PublishEvent(ctx context.Context, pubsubName, topicName string, data any) error {
 	return p.client.PublishEvent(ctx, pubsubName, topicName, data)
+}
+
+type bundleMarker struct {
+	PlanBlobKey string `json:"plan_blob_key,omitempty"`
+	PlanSHA256  string `json:"plan_sha256"`
+}
+
+type extractedBundle struct {
+	ExtractDir string
+	PluginLock harness.PluginLockFile
+}
+
+func (d *WorkerDaemon) effectiveTempDir() string {
+	if t := strings.TrimSpace(d.opts.TempDir); t != "" {
+		return t
+	}
+	return os.TempDir()
+}
+
+func (d *WorkerDaemon) runBundleExtractDir(runID string) string {
+	return filepath.Join(d.effectiveTempDir(), "bundles", sanitizeSegment(runID, "run"))
+}
+
+func (d *WorkerDaemon) lockRunBundle(sanitizedRunID string) func() {
+	d.bundleLockMu.Lock()
+	if d.bundleLocks == nil {
+		d.bundleLocks = make(map[string]*sync.Mutex)
+	}
+	mu, ok := d.bundleLocks[sanitizedRunID]
+	if !ok {
+		mu = &sync.Mutex{}
+		d.bundleLocks[sanitizedRunID] = mu
+	}
+	d.bundleLockMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
+
+func (d *WorkerDaemon) registerLiveTaskLocked(runID string, generation uint64, aborted *atomic.Bool) uint64 {
+	d.nextTaskSeq++
+	seq := d.nextTaskSeq
+	if d.liveTasks == nil {
+		d.liveTasks = make(map[uint64]liveRunTask)
+	}
+	if d.liveTaskCh == nil {
+		d.liveTaskCh = make(chan struct{})
+	}
+	d.liveTasks[seq] = liveRunTask{
+		runID:      runID,
+		generation: generation,
+		aborted:    aborted,
+	}
+	return seq
+}
+
+func (d *WorkerDaemon) removeLiveTask(seq uint64) {
+	d.mu.Lock()
+	delete(d.liveTasks, seq)
+	if d.liveTaskCh != nil {
+		close(d.liveTaskCh)
+		d.liveTaskCh = make(chan struct{})
+	}
+	d.mu.Unlock()
+}
+
+func (d *WorkerDaemon) inspectLiveTasksForRunLocked(runID string) (hasLive bool, hasNonAborting bool) {
+	for _, t := range d.liveTasks {
+		if t.runID != runID {
+			continue
+		}
+		hasLive = true
+		isAborting := (t.aborted != nil && t.aborted.Load()) || t.generation != d.generation
+		if !isAborting {
+			hasNonAborting = true
+		}
+	}
+	return hasLive, hasNonAborting
+}
+
+func (d *WorkerDaemon) hasLiveTasksForRun(runID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	hasLive, _ := d.inspectLiveTasksForRunLocked(runID)
+	return hasLive
+}
+
+func (d *WorkerDaemon) waitForAbortingRunTasks(ctx context.Context, runID string) bool {
+	waitCtx, cancel := context.WithTimeout(ctx, cleanupAbortGraceTimeout)
+	defer cancel()
+
+	for {
+		d.mu.Lock()
+		hasLive, hasNonAborting := d.inspectLiveTasksForRunLocked(runID)
+		ch := d.liveTaskCh
+		d.mu.Unlock()
+
+		if !hasLive {
+			return true
+		}
+		if hasNonAborting || ch == nil {
+			return false
+		}
+
+		select {
+		case <-ch:
+		case <-waitCtx.Done():
+			return !d.hasLiveTasksForRun(runID)
+		}
+	}
+}
+
+func (d *WorkerDaemon) handleCleanupRunInvocation(ctx context.Context, in *common.InvocationEvent) (*common.Content, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if in == nil || len(in.Data) == 0 {
+		return nil, errors.New("daemon: cleanup_run payload is required")
+	}
+	var req CleanupRunRequest
+	if err := json.Unmarshal(in.Data, &req); err != nil {
+		return nil, fmt.Errorf("daemon: decode cleanup_run request: %w", err)
+	}
+	runID := strings.TrimSpace(req.RunID)
+	if runID == "" {
+		return nil, errors.New("daemon: run_id is required")
+	}
+
+	if !d.waitForAbortingRunTasks(ctx, runID) {
+		return marshalInvocationContent(CleanupRunResponse{
+			Removed: false,
+			Busy:    true,
+		})
+	}
+
+	sanitized := sanitizeSegment(runID, "run")
+	unlock := d.lockRunBundle(sanitized)
+	defer unlock()
+
+	if d.hasLiveTasksForRun(runID) {
+		return marshalInvocationContent(CleanupRunResponse{
+			Removed: false,
+			Busy:    true,
+		})
+	}
+
+	extractDir := d.runBundleExtractDir(runID)
+	if _, err := os.Stat(extractDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return marshalInvocationContent(CleanupRunResponse{
+				Removed: false,
+			})
+		}
+		return nil, fmt.Errorf("daemon: inspect bundle dir %q: %w", extractDir, err)
+	}
+	if err := os.RemoveAll(extractDir); err != nil {
+		return nil, fmt.Errorf("daemon: remove bundle dir %q: %w", extractDir, err)
+	}
+	return marshalInvocationContent(CleanupRunResponse{
+		Removed: true,
+	})
+}
+
+func (d *WorkerDaemon) ensureRunBundleExtracted(ctx context.Context, runID, planBlobKey, expectedSHA string) (extractedBundle, error) {
+	key := strings.TrimSpace(planBlobKey)
+	expSHA := strings.TrimSpace(expectedSHA)
+	if key == "" {
+		if expSHA != "" {
+			return extractedBundle{}, errors.New("daemon: plan_blob_key is required when plan_sha256 is set")
+		}
+		return extractedBundle{}, nil
+	}
+
+	sanitized := sanitizeSegment(runID, "run")
+	ch := d.bundleSF.DoChan(sanitized, func() (any, error) {
+		extractCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		unlock := d.lockRunBundle(sanitized)
+		defer unlock()
+
+		extractDir := d.runBundleExtractDir(runID)
+		markerPath := filepath.Join(extractDir, bundleMarkerFile)
+		if markerBytes, err := os.ReadFile(markerPath); err == nil {
+			var marker bundleMarker
+			if uErr := json.Unmarshal(markerBytes, &marker); uErr != nil {
+				return nil, fmt.Errorf("daemon: invalid bundle marker for run %q: %w", runID, uErr)
+			}
+			if expSHA != "" && !strings.EqualFold(marker.PlanSHA256, expSHA) {
+				return nil, fmt.Errorf("daemon: bundle sha256 mismatch for run %q: cached %s, requested %s", runID, marker.PlanSHA256, expSHA)
+			}
+			if info, sErr := os.Stat(extractDir); sErr == nil && info.IsDir() {
+				lockFile, lErr := loadPluginLockFromExtract(extractDir)
+				if lErr != nil {
+					return nil, lErr
+				}
+				return extractedBundle{
+					ExtractDir: extractDir,
+					PluginLock: lockFile,
+				}, nil
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("daemon: read bundle marker for run %q: %w", runID, err)
+		}
+
+		if d.opts.BlobStore == nil {
+			return nil, errors.New("daemon: blob_store is required to download plan bundle")
+		}
+		bundlesRoot := filepath.Join(d.effectiveTempDir(), "bundles")
+		if err := os.MkdirAll(bundlesRoot, 0o755); err != nil {
+			return nil, fmt.Errorf("daemon: create bundles root %q: %w", bundlesRoot, err)
+		}
+
+		rc, _, err := d.opts.BlobStore.Get(extractCtx, key, expSHA)
+		if err != nil {
+			return nil, fmt.Errorf("daemon: fetch plan %q from blob store: %w", key, err)
+		}
+		defer func() { _ = rc.Close() }()
+
+		tmpFile, err := os.CreateTemp(bundlesRoot, ".plan-"+sanitized+"-*.sofaplan")
+		if err != nil {
+			return nil, fmt.Errorf("daemon: create temp plan file: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+		defer func() {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}()
+
+		hasher := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), rc); err != nil {
+			return nil, fmt.Errorf("daemon: stream plan %q: %w", key, err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			return nil, fmt.Errorf("daemon: close temp plan file: %w", err)
+		}
+		actualSHA := hex.EncodeToString(hasher.Sum(nil))
+		if expSHA != "" && !strings.EqualFold(actualSHA, expSHA) {
+			return nil, fmt.Errorf("daemon: plan sha256 mismatch for run %q: expected %s, got %s", runID, expSHA, actualSHA)
+		}
+
+		stagingDir, err := os.MkdirTemp(bundlesRoot, ".staging-"+sanitized+"-*")
+		if err != nil {
+			return nil, fmt.Errorf("daemon: create staging bundle dir: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(stagingDir) }()
+
+		loaded, err := plan.LoadArchive(tmpPath, stagingDir, plan.LoadArchiveOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("daemon: load plan archive for run %q: %w", runID, err)
+		}
+
+		markerData, err := json.Marshal(bundleMarker{
+			PlanBlobKey: key,
+			PlanSHA256:  actualSHA,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("daemon: encode bundle marker: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(stagingDir, bundleMarkerFile), markerData, 0o600); err != nil {
+			return nil, fmt.Errorf("daemon: write bundle marker: %w", err)
+		}
+
+		if err := os.RemoveAll(extractDir); err != nil {
+			return nil, fmt.Errorf("daemon: clear stale bundle dir %q: %w", extractDir, err)
+		}
+		if err := os.Rename(stagingDir, extractDir); err != nil {
+			return nil, fmt.Errorf("daemon: activate bundle dir %q: %w", extractDir, err)
+		}
+
+		var lockFile harness.PluginLockFile
+		if loaded.PluginLock != nil {
+			lockFile = *loaded.PluginLock
+		}
+		return extractedBundle{
+			ExtractDir: extractDir,
+			PluginLock: lockFile,
+		}, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return extractedBundle{}, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return extractedBundle{}, res.Err
+		}
+		bundle, ok := res.Val.(extractedBundle)
+		if !ok {
+			return extractedBundle{}, errors.New("daemon: unexpected bundle extraction result type")
+		}
+		return bundle, nil
+	}
+}
+
+func loadPluginLockFromExtract(extractDir string) (harness.PluginLockFile, error) {
+	lockPath := filepath.Join(extractDir, "plugins.lock.json")
+	raw, err := os.ReadFile(lockPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return harness.PluginLockFile{}, nil
+		}
+		return harness.PluginLockFile{}, fmt.Errorf("daemon: read %q: %w", lockPath, err)
+	}
+	var lockFile harness.PluginLockFile
+	if err := json.Unmarshal(raw, &lockFile); err != nil {
+		return harness.PluginLockFile{}, fmt.Errorf("daemon: decode %q: %w", lockPath, err)
+	}
+	if err := harness.ValidateLockFile(lockFile); err != nil {
+		return harness.PluginLockFile{}, fmt.Errorf("daemon: invalid %q: %w", lockPath, err)
+	}
+	return lockFile, nil
+}
+
+func bundleDirForExtract(extractDir, bundlePath string) (string, error) {
+	if strings.TrimSpace(extractDir) == "" {
+		return "", nil
+	}
+	if bp := strings.TrimSpace(bundlePath); bp != "" {
+		if strings.Contains(bp, `\`) || strings.HasPrefix(bp, "/") || (len(bp) >= 2 && isASCIIAlpha(bp[0]) && bp[1] == ':') {
+			return "", fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
+		}
+		cleaned := path.Clean(filepath.ToSlash(bp))
+		if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+			return "", fmt.Errorf("daemon: invalid bundle_path %q", bundlePath)
+		}
+		if cleaned != "." {
+			candidate := filepath.Join(extractDir, filepath.FromSlash(cleaned))
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
+	cfgDir := filepath.Join(extractDir, "config")
+	if info, err := os.Stat(cfgDir); err == nil && info.IsDir() {
+		return cfgDir, nil
+	}
+	return extractDir, nil
+}
+
+func isASCIIAlpha(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }

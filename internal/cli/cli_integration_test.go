@@ -254,14 +254,17 @@ output "work_branch" {
 	expectedWorkBranch := git.WorkBranchName(runID, "worker.build")
 	assert.Contains(t, outBuf.String(), expectedWorkBranch)
 
-	// Verify work_branch exists in bare remote.git and local blob dir exists.
+	// Verify work_branch exists in bare remote.git and local blob + worker bundle dirs exist.
 	workSHA := runGitCLIForIT(t, bareDir, "rev-parse", "--verify", "refs/heads/"+expectedWorkBranch)
 	assert.NotEmpty(t, workSHA)
 	runBlobDir := filepath.Join(stateDir, "blobs", "objects", "runs", runID)
 	_, statErr := os.Stat(runBlobDir)
 	require.NoError(t, statErr, "expected blob directory %s to exist before delete", runBlobDir)
+	workerBundleDir := filepath.Join(stateDir, "worker-tmp", "bundles", runID)
+	_, bundleStatErr := os.Stat(workerBundleDir)
+	require.NoError(t, bundleStatErr, "expected worker bundle directory %s to exist before delete", workerBundleDir)
 
-	// 5. Run `sofa delete <run_id>` and verify remote ckpt/work branches and local blobs are deleted while main remains.
+	// 5. Run `sofa delete <run_id>` and verify remote ckpt/work branches, local blobs, and worker bundle dir are deleted while main remains.
 	outBuf.Reset()
 	errBuf.Reset()
 	code = cli.Run(ctx, []string{"delete", runID}, strings.NewReader(""), &outBuf, &errBuf, optsWithSecret)
@@ -276,4 +279,6 @@ output "work_branch" {
 
 	_, statAfterErr := os.Stat(runBlobDir)
 	assert.ErrorIs(t, statAfterErr, os.ErrNotExist, "expected blob directory %s to be deleted", runBlobDir)
+	_, bundleAfterErr := os.Stat(workerBundleDir)
+	assert.ErrorIs(t, bundleAfterErr, os.ErrNotExist, "expected worker bundle directory %s to be deleted", workerBundleDir)
 }

@@ -24,6 +24,7 @@ import (
 	actorcfg "github.com/lonegunmanb/sofa/internal/actor/config"
 	"github.com/lonegunmanb/sofa/internal/actor/merge"
 	"github.com/lonegunmanb/sofa/internal/actor/node"
+	"github.com/lonegunmanb/sofa/internal/actor/registry"
 	"github.com/lonegunmanb/sofa/internal/applyeval"
 	"github.com/lonegunmanb/sofa/internal/artifact"
 	"github.com/lonegunmanb/sofa/internal/blob"
@@ -47,21 +48,24 @@ const runStateKey = "run_actor_v1"
 
 // RunOptions configures RunActor dependencies and defaults.
 type RunOptions struct {
-	ClientProvider    func() daprclient.Client
-	BlobStore         blob.Store
-	BundleCacheRoot   string
-	NodeController    NodeController
-	MergeController   MergeController
-	OperatorIndex     OperatorIndex
-	ConfigManager     ConfigManager
-	EventPublisher    EventPublisher
-	ReminderScheduler ReminderScheduler
-	GitAdapter        git.Adapter
-	PubSubName        string
-	EventsTopic       string
-	ReconcileInterval time.Duration
-	ReconcileReminder string
-	Clock             func() time.Time
+	ClientProvider       func() daprclient.Client
+	BlobStore            blob.Store
+	BundleCacheRoot      string
+	NodeController       NodeController
+	MergeController      MergeController
+	OperatorIndex        OperatorIndex
+	ConfigManager        ConfigManager
+	EventPublisher       EventPublisher
+	ReminderScheduler    ReminderScheduler
+	GitAdapter           git.Adapter
+	ProcessLister        ProcessLister
+	WorkerCleaner        WorkerBundleCleaner
+	WorkerCleanupTimeout time.Duration
+	PubSubName           string
+	EventsTopic          string
+	ReconcileInterval    time.Duration
+	ReconcileReminder    string
+	Clock                func() time.Time
 }
 
 type sourceRecord struct {
@@ -122,10 +126,7 @@ type persistedRunState struct {
 	BundleExtractDir      string                                `json:"bundle_extract_dir,omitempty"`
 	RunOverrides          map[string]string                     `json:"run_overrides,omitempty"`
 	RequiredArch          string                                `json:"required_arch,omitempty"`
-	HostOS                string                                `json:"host_os,omitempty"`
 	TargetPlatform        *harnessinstaller.Platform            `json:"target_platform,omitempty"`
-	PluginResolve         daemon.PluginResolveConfig            `json:"plugin_resolve,omitempty"`
-	TempRoot              string                                `json:"temp_root,omitempty"`
 	MaxGatekeeperReworks  int                                   `json:"max_gatekeeper_reworks,omitempty"`
 	MaxArtifactReworks    int                                   `json:"max_artifact_reworks,omitempty"`
 	StallTimeout          time.Duration                         `json:"stall_timeout,omitempty"`
@@ -190,6 +191,15 @@ func NewRunActor(opts RunOptions) *RunActor {
 	}
 	if opts.GitAdapter == nil {
 		opts.GitAdapter = git.NewCLIAdapter(git.CLIAdapterOptions{})
+	}
+	if opts.WorkerCleanupTimeout <= 0 {
+		opts.WorkerCleanupTimeout = DefaultWorkerCleanupTimeout
+	}
+	if opts.ProcessLister == nil && opts.ClientProvider != nil {
+		opts.ProcessLister = NewDaprProcessLister(opts.ClientProvider)
+	}
+	if opts.WorkerCleaner == nil && opts.ClientProvider != nil {
+		opts.WorkerCleaner = NewDaprWorkerBundleCleaner(opts.ClientProvider)
 	}
 	return &RunActor{opts: opts}
 }
@@ -391,10 +401,7 @@ func (a *RunActor) StartRun(ctx context.Context, req *StartRunReq) (*StartRunRes
 		BundleExtractDir:      extractDir,
 		RunOverrides:          maps.Clone(req.RunOverrides),
 		RequiredArch:          req.RequiredArch,
-		HostOS:                req.HostOS,
 		TargetPlatform:        req.TargetPlatform,
-		PluginResolve:         req.PluginResolve,
-		TempRoot:              req.TempRoot,
 		MaxGatekeeperReworks:  req.MaxGatekeeperReworks,
 		MaxArtifactReworks:    req.MaxArtifactReworks,
 		StallTimeout:          req.StallTimeout,
@@ -1321,7 +1328,6 @@ func (a *RunActor) reconcileMergeNodeLocked(
 	}
 	envKeys, _ := actorcfg.ExtractNodeEnvRefs(loaded.Plan, rec.CanonicalAddress)
 	tokenRef, sshKeyRef := findSourceCredentialRefs(st, repoURL)
-	bundleDir := bundleDirForPlan(loaded, currentPlan)
 
 	// Pre-register Run-exclusive KindMergeBranch directly in st.Ledger once per (branch, epoch, baseSHA)
 	// so MergeActor.EnqueueCandidate never synchronously calls back into RunActor.RegisterManagedBranch
@@ -1383,9 +1389,9 @@ func (a *RunActor) reconcileMergeNodeLocked(
 				RequiredArch:        st.RequiredArch,
 				Sandbox:             sandboxCfg,
 				Gatekeepers:         slices.Clone(mat.Gatekeepers),
-				BundleDir:           bundleDir,
-				HostOS:              st.HostOS,
-				TempRoot:            st.TempRoot,
+				PlanBlobKey:         st.PlanBlobKey,
+				PlanSHA256:          st.PlanSHA256,
+				BundlePath:          currentPlan.BundlePath(),
 			},
 		})
 	}
@@ -1498,11 +1504,10 @@ func (a *RunActor) prepareWorkerDispatchLocked(
 			Tools:                 toolsMap,
 			ToolEnvs:              toolEnvs,
 			Imports:               imports,
-			BundleDir:             bundleDirForPlan(loaded, currentPlan),
-			TempRoot:              st.TempRoot,
-			HostOS:                st.HostOS,
+			PlanBlobKey:           st.PlanBlobKey,
+			PlanSHA256:            st.PlanSHA256,
+			BundlePath:            currentPlan.BundlePath(),
 			TargetPlatform:        st.TargetPlatform,
-			PluginResolve:         st.PluginResolve,
 			MaxGatekeeperReworks:  st.MaxGatekeeperReworks,
 			MaxArtifactReworks:    st.MaxArtifactReworks,
 			StallTimeout:          st.StallTimeout,
@@ -2424,6 +2429,7 @@ func (a *RunActor) DeleteRun(ctx context.Context, _ *DeleteRunReq) (*DeleteRunRe
 	if extractDir != "" {
 		_ = os.RemoveAll(extractDir)
 	}
+	a.cleanupWorkerBundles(ctx, runID)
 
 	a.mu.Lock()
 	st, exists, err = a.loadStateLocked(ctx)
@@ -2446,6 +2452,64 @@ func (a *RunActor) DeleteRun(ctx context.Context, _ *DeleteRunReq) (*DeleteRunRe
 		DeletedBranches: deletedBranches,
 		Status:          RunStatusDeleted,
 	}, nil
+}
+
+func (a *RunActor) cleanupWorkerBundles(ctx context.Context, runID string) {
+	if a.opts.ProcessLister == nil || a.opts.WorkerCleaner == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	timeout := a.opts.WorkerCleanupTimeout
+	if timeout <= 0 {
+		timeout = DefaultWorkerCleanupTimeout
+	}
+	cleanCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		listResp, err := a.opts.ProcessLister.ListProcesses(cleanCtx, &registry.ListProcessesReq{})
+		if err != nil || listResp == nil || len(listResp.Processes) == 0 {
+			return
+		}
+		seen := make(map[string]struct{}, len(listResp.Processes))
+		var appIDs []string
+		for _, proc := range listResp.Processes {
+			if proc.Status != registry.StatusHealthy && proc.Status != registry.StatusSuspect {
+				continue
+			}
+			appID := strings.TrimSpace(proc.AppID)
+			if appID == "" {
+				continue
+			}
+			if _, dup := seen[appID]; dup {
+				continue
+			}
+			seen[appID] = struct{}{}
+			appIDs = append(appIDs, appID)
+		}
+		if len(appIDs) == 0 {
+			return
+		}
+		sort.Strings(appIDs)
+
+		var wg sync.WaitGroup
+		for _, appID := range appIDs {
+			wg.Add(1)
+			go func(targetAppID string) {
+				defer wg.Done()
+				_, _ = a.opts.WorkerCleaner.CleanupRun(cleanCtx, targetAppID, daemon.CleanupRunRequest{
+					RunID: runID,
+				})
+			}(appID)
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+	case <-cleanCtx.Done():
+	}
 }
 
 // GetRunState returns the authoritative state snapshot of the RunActor.

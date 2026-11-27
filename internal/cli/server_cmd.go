@@ -277,12 +277,7 @@ func runDevServer(ctx context.Context, cmd *cobra.Command, opts Options, cfg dev
 		UIHandler:    resolveUIHandler(opts.UIHandler),
 		RunDefaults: server.RunStartDefaults{
 			RequiredArch:   platform.Key(),
-			HostOS:         runtime.GOOS,
 			TargetPlatform: &platform,
-			PluginResolve: daemon.PluginResolveConfig{
-				PluginDir: strings.TrimSpace(cfg.PluginDir),
-			},
-			TempRoot: filepath.Join(absStateDir, "worker-tmp"),
 		},
 		RegisterInternal: func(svc common.Service) error {
 			registerControlPlaneActors(svc, cpClientProvider, blobStore, filepath.Join(absStateDir, "bundle-cache"))
@@ -388,7 +383,6 @@ type distributedServerConfig struct {
 func runDistributedServer(ctx context.Context, cmd *cobra.Command, opts Options, cfg distributedServerConfig) error {
 	defaultBlobDir := ""
 	bundleCacheRoot := ""
-	tempRoot := ""
 	if strings.TrimSpace(cfg.StateDir) != "" {
 		absState, err := filepath.Abs(cfg.StateDir)
 		if err != nil {
@@ -399,7 +393,6 @@ func runDistributedServer(ctx context.Context, cmd *cobra.Command, opts Options,
 		}
 		defaultBlobDir = filepath.Join(absState, "blobs")
 		bundleCacheRoot = filepath.Join(absState, "bundle-cache")
-		tempRoot = filepath.Join(absState, "worker-tmp")
 	}
 
 	blobStore, err := openBlobStore(ctx, cfg.BlobFlags, defaultBlobDir)
@@ -441,12 +434,7 @@ func runDistributedServer(ctx context.Context, cmd *cobra.Command, opts Options,
 		UIHandler:    resolveUIHandler(opts.UIHandler),
 		RunDefaults: server.RunStartDefaults{
 			RequiredArch:   platform.Key(),
-			HostOS:         runtime.GOOS,
 			TargetPlatform: &platform,
-			PluginResolve: daemon.PluginResolveConfig{
-				PluginDir: strings.TrimSpace(cfg.PluginDir),
-			},
-			TempRoot: tempRoot,
 		},
 		RegisterInternal: func(svc common.Service) error {
 			registerControlPlaneActors(svc, cpClientProvider, blobStore, bundleCacheRoot)

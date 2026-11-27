@@ -13,6 +13,7 @@ import (
 	"github.com/lonegunmanb/sofa/internal/actor/config"
 	"github.com/lonegunmanb/sofa/internal/actor/merge"
 	"github.com/lonegunmanb/sofa/internal/actor/node"
+	"github.com/lonegunmanb/sofa/internal/actor/registry"
 	"github.com/lonegunmanb/sofa/internal/applyeval"
 	"github.com/lonegunmanb/sofa/internal/artifact"
 	"github.com/lonegunmanb/sofa/internal/git"
@@ -32,6 +33,8 @@ const (
 
 	// DefaultReconcileInterval is the default safety-net reminder cadence while a Run is active.
 	DefaultReconcileInterval = 5 * time.Second
+	// DefaultWorkerCleanupTimeout bounds best-effort worker bundle cleanup during DeleteRun.
+	DefaultWorkerCleanupTimeout = 3 * time.Second
 	// DefaultReconcileReminderName is the persistent reminder name used by RunActor.
 	DefaultReconcileReminderName = "run-reconcile"
 
@@ -368,10 +371,7 @@ type StartRunReq struct {
 	PlanSHA256            string                     `json:"plan_sha256,omitempty"`
 	RunOverrides          map[string]string          `json:"run_overrides,omitempty"`
 	RequiredArch          string                     `json:"required_arch,omitempty"`
-	HostOS                string                     `json:"host_os,omitempty"`
 	TargetPlatform        *harnessinstaller.Platform `json:"target_platform,omitempty"`
-	PluginResolve         daemon.PluginResolveConfig `json:"plugin_resolve,omitempty"`
-	TempRoot              string                     `json:"temp_root,omitempty"`
 	MaxGatekeeperReworks  int                        `json:"max_gatekeeper_reworks,omitempty"`
 	MaxArtifactReworks    int                        `json:"max_artifact_reworks,omitempty"`
 	StallTimeout          time.Duration              `json:"stall_timeout,omitempty"`
@@ -694,6 +694,16 @@ type ReminderScheduler interface {
 // RunReconciler wakes active RunActors during OperatorActor recovery.
 type RunReconciler interface {
 	Reconcile(ctx context.Context, runID string, req *ReconcileReq) (*ReconcileResp, error)
+}
+
+// ProcessLister enumerates registered worker processes from ProcessRegistryActor.
+type ProcessLister interface {
+	ListProcesses(ctx context.Context, req *registry.ListProcessesReq) (*registry.ListProcessesResp, error)
+}
+
+// WorkerBundleCleaner invokes worker-side run bundle cleanup ("cleanup_run").
+type WorkerBundleCleaner interface {
+	CleanupRun(ctx context.Context, appID string, req daemon.CleanupRunRequest) (daemon.CleanupRunResponse, error)
 }
 
 // RunClient provides a lossless client facade over RunActor (both direct and Dapr-backed).
@@ -1169,4 +1179,58 @@ func (r *daprRunReconciler) Reconcile(ctx context.Context, runID string, req *Re
 		req = &ReconcileReq{}
 	}
 	return NewRunClientStub(runID, c).Reconcile(ctx, req)
+}
+
+type daprProcessLister struct {
+	clientProvider func() daprclient.Client
+}
+
+// NewDaprProcessLister constructs a ProcessLister backed by ProcessRegistryActor("global").
+func NewDaprProcessLister(clientProvider func() daprclient.Client) ProcessLister {
+	return &daprProcessLister{clientProvider: clientProvider}
+}
+
+func (l *daprProcessLister) ListProcesses(ctx context.Context, req *registry.ListProcessesReq) (*registry.ListProcessesResp, error) {
+	c := l.clientProvider()
+	if c == nil {
+		return nil, errors.New("run: dapr client unavailable")
+	}
+	if req == nil {
+		req = &registry.ListProcessesReq{}
+	}
+	return registry.NewClientStub(c).ListProcesses(ctx, req)
+}
+
+type daprWorkerBundleCleaner struct {
+	clientProvider func() daprclient.Client
+}
+
+// NewDaprWorkerBundleCleaner constructs a WorkerBundleCleaner backed by Dapr Service Invocation.
+func NewDaprWorkerBundleCleaner(clientProvider func() daprclient.Client) WorkerBundleCleaner {
+	return &daprWorkerBundleCleaner{clientProvider: clientProvider}
+}
+
+func (w *daprWorkerBundleCleaner) CleanupRun(ctx context.Context, appID string, req daemon.CleanupRunRequest) (daemon.CleanupRunResponse, error) {
+	c := w.clientProvider()
+	if c == nil {
+		return daemon.CleanupRunResponse{}, errors.New("run: dapr client unavailable")
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return daemon.CleanupRunResponse{}, err
+	}
+	raw, err := c.InvokeMethodWithContent(ctx, appID, "cleanup_run", "POST", &daprclient.DataContent{
+		ContentType: "application/json",
+		Data:        payload,
+	})
+	if err != nil {
+		return daemon.CleanupRunResponse{}, err
+	}
+	var resp daemon.CleanupRunResponse
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return daemon.CleanupRunResponse{}, fmt.Errorf("decode cleanup_run response: %w", err)
+		}
+	}
+	return resp, nil
 }

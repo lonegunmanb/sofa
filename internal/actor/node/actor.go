@@ -1908,21 +1908,18 @@ func mergeDispatchSpec(prev *DispatchSpec, runID, nodeAddr string, req *StartOrR
 	if req.Imports != nil {
 		out.Imports = slices.Clone(req.Imports)
 	}
-	if req.BundleDir != "" {
-		out.BundleDir = req.BundleDir
+	if req.PlanBlobKey != "" {
+		out.PlanBlobKey = req.PlanBlobKey
 	}
-	if req.TempRoot != "" {
-		out.TempRoot = req.TempRoot
+	if req.PlanSHA256 != "" {
+		out.PlanSHA256 = req.PlanSHA256
 	}
-	if req.HostOS != "" {
-		out.HostOS = req.HostOS
+	if req.BundlePath != "" {
+		out.BundlePath = req.BundlePath
 	}
 	if req.TargetPlatform != nil {
 		p := *req.TargetPlatform
 		out.TargetPlatform = &p
-	}
-	if req.PluginResolve.PluginDir != "" || req.PluginResolve.CacheRoot != "" || req.PluginResolve.WorkingDir != "" || len(req.PluginResolve.LockFile.Plugins) > 0 {
-		out.PluginResolve = req.PluginResolve
 	}
 	if req.MaxGatekeeperReworks > 0 {
 		out.MaxGatekeeperReworks = req.MaxGatekeeperReworks
@@ -2015,11 +2012,10 @@ func buildDaemonStartNodeRequest(spec *DispatchSpec, epoch uint64, claim *regist
 		ToolEnvs:              maps.Clone(spec.ToolEnvs),
 		Imports:               slices.Clone(spec.Imports),
 		ResolvedEnv:           maps.Clone(resolvedEnv),
-		BundleDir:             spec.BundleDir,
-		TempRoot:              spec.TempRoot,
-		HostOS:                spec.HostOS,
+		PlanBlobKey:           spec.PlanBlobKey,
+		PlanSHA256:            spec.PlanSHA256,
+		BundlePath:            spec.BundlePath,
 		TargetPlatform:        spec.TargetPlatform,
-		PluginResolve:         spec.PluginResolve,
 		MaxGatekeeperReworks:  spec.MaxGatekeeperReworks,
 		MaxArtifactReworks:    spec.MaxArtifactReworks,
 		StallTimeout:          spec.StallTimeout,

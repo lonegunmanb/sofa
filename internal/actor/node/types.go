@@ -288,11 +288,10 @@ type DispatchSpec struct {
 	Tools                 map[string]plan.ToolSpec                `json:"tools,omitempty"`
 	ToolEnvs              map[string]runner.ExternalToolEnvConfig `json:"tool_envs,omitempty"`
 	Imports               []artifact.ImportRequest                `json:"imports,omitempty"`
-	BundleDir             string                                  `json:"bundle_dir,omitempty"`
-	TempRoot              string                                  `json:"temp_root,omitempty"`
-	HostOS                string                                  `json:"host_os,omitempty"`
+	PlanBlobKey           string                                  `json:"plan_blob_key,omitempty"`
+	PlanSHA256            string                                  `json:"plan_sha256,omitempty"`
+	BundlePath            string                                  `json:"bundle_path,omitempty"`
 	TargetPlatform        *harnessinstaller.Platform              `json:"target_platform,omitempty"`
-	PluginResolve         daemon.PluginResolveConfig              `json:"plugin_resolve,omitempty"`
 	MaxGatekeeperReworks  int                                     `json:"max_gatekeeper_reworks,omitempty"`
 	MaxArtifactReworks    int                                     `json:"max_artifact_reworks,omitempty"`
 	StallTimeout          time.Duration                           `json:"stall_timeout,omitempty"`
@@ -325,11 +324,10 @@ type StartOrResumeReq struct {
 	Tools                 map[string]plan.ToolSpec                `json:"tools,omitempty"`
 	ToolEnvs              map[string]runner.ExternalToolEnvConfig `json:"tool_envs,omitempty"`
 	Imports               []artifact.ImportRequest                `json:"imports,omitempty"`
-	BundleDir             string                                  `json:"bundle_dir,omitempty"`
-	TempRoot              string                                  `json:"temp_root,omitempty"`
-	HostOS                string                                  `json:"host_os,omitempty"`
+	PlanBlobKey           string                                  `json:"plan_blob_key,omitempty"`
+	PlanSHA256            string                                  `json:"plan_sha256,omitempty"`
+	BundlePath            string                                  `json:"bundle_path,omitempty"`
 	TargetPlatform        *harnessinstaller.Platform              `json:"target_platform,omitempty"`
-	PluginResolve         daemon.PluginResolveConfig              `json:"plugin_resolve,omitempty"`
 	MaxGatekeeperReworks  int                                     `json:"max_gatekeeper_reworks,omitempty"`
 	MaxArtifactReworks    int                                     `json:"max_artifact_reworks,omitempty"`
 	StallTimeout          time.Duration                           `json:"stall_timeout,omitempty"`

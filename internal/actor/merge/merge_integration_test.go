@@ -310,6 +310,9 @@ func TestMergeActor_RealDaprGitAndPodmanSerialIntegration(t *testing.T) {
 		_ = mgrW.Stop(context.Background())
 	}()
 
+	tempRoot := filepath.Join(rootDir, "merge-tmp")
+	require.NoError(t, os.MkdirAll(tempRoot, 0o755))
+
 	workerDaemon, err := daemon.New(daemon.Options{
 		ProcessID:         "proc-merge-it",
 		AppID:             "sofa-worker-it-merge",
@@ -319,6 +322,7 @@ func TestMergeActor_RealDaprGitAndPodmanSerialIntegration(t *testing.T) {
 		Registry:          daemon.NewDaprRegistryClient(wClient),
 		MergeReporter:     &daprMergeResultReporter{client: wClient},
 		HeartbeatInterval: 250 * time.Millisecond,
+		TempDir:           tempRoot,
 		// Leave GitAdapter and SandboxEngine nil to exercise real isolated CLIAdapter + PodmanEngine!
 	})
 	require.NoError(t, err)
@@ -341,8 +345,6 @@ func TestMergeActor_RealDaprGitAndPodmanSerialIntegration(t *testing.T) {
 		ExpectExitCode:   0,
 		RequireCleanTree: true,
 	}}
-	tempRoot := filepath.Join(rootDir, "merge-tmp")
-	require.NoError(t, os.MkdirAll(tempRoot, 0o755))
 
 	enqueue := func(src, candBranch string) error {
 		resp, eErr := mergeStub.EnqueueCandidate(ctx, &merge.EnqueueCandidateReq{
@@ -358,7 +360,6 @@ func TestMergeActor_RealDaprGitAndPodmanSerialIntegration(t *testing.T) {
 			RequiredArch:    "linux/amd64",
 			Sandbox:         sb,
 			Gatekeepers:     gks,
-			TempRoot:        tempRoot,
 		})
 		if eErr != nil {
 			return eErr

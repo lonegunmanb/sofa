@@ -242,6 +242,7 @@ output "secret_note" {
 		BlobStore:         blobStore,
 		NodeReporter:      cpAdapter,
 		HeartbeatInterval: 200 * time.Millisecond,
+		TempDir:           filepath.Join(rootDir, "worker-tmp"),
 		NodeRunnerDepsProvider: func(_ context.Context, req runner.NodeExecutionRequest) (runner.WorkerRunnerDeps, error) {
 			c := cpClientProvider()
 			remoteCP, cpErr := node.NewRemoteNodeControlPlaneForNode(c, req.RunID, req.NodeAddr, req.Epoch)
@@ -305,7 +306,6 @@ output "secret_note" {
 		BlobStore:    blobStore,
 		RunDefaults: server.RunStartDefaults{
 			RequiredArch: "linux/amd64",
-			TempRoot:     filepath.Join(rootDir, "worker-tmp"),
 		},
 		RegisterInternal: func(svc common.Service) error {
 			svc.RegisterActorImplFactoryContext(func() actor.ServerContext {

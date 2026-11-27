@@ -256,10 +256,10 @@ func (a *MergeActor) EnqueueCandidate(ctx context.Context, req *EnqueueCandidate
 		RequiredArch: strings.TrimSpace(req.RequiredArch),
 		Sandbox:      req.Sandbox,
 		Gatekeepers:  cloneGatekeepers(req.Gatekeepers),
-		BundleDir:    req.BundleDir,
+		PlanBlobKey:  req.PlanBlobKey,
+		PlanSHA256:   req.PlanSHA256,
+		BundlePath:   req.BundlePath,
 		ImportsDir:   req.ImportsDir,
-		HostOS:       req.HostOS,
-		TempRoot:     req.TempRoot,
 		Status:       TicketStatusPending,
 		EnqueuedAt:   now,
 		UpdatedAt:    now,
@@ -1216,10 +1216,10 @@ func buildRunMergeCandidateRequest(actorID string, t CandidateTicket, claim *reg
 		ResolvedEnv: maps.Clone(resolvedEnv),
 		Sandbox:     t.Sandbox,
 		Gatekeepers: cloneGatekeepers(t.Gatekeepers),
-		BundleDir:   t.BundleDir,
+		PlanBlobKey: t.PlanBlobKey,
+		PlanSHA256:  t.PlanSHA256,
+		BundlePath:  t.BundlePath,
 		ImportsDir:  t.ImportsDir,
-		HostOS:      t.HostOS,
-		TempRoot:    t.TempRoot,
 	}
 }
 

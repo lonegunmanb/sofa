@@ -454,6 +454,7 @@ output "final_branch" {
 		BlobStore:         blobStore,
 		NodeReporter:      &itNodeOutcomeReporter{client: w1Client, killed: &worker1Killed},
 		HeartbeatInterval: 150 * time.Millisecond,
+		TempDir:           filepath.Join(rootDir, "worker1-tmp"),
 		NodeRunnerDepsProvider: func(_ context.Context, req runner.NodeExecutionRequest) (runner.WorkerRunnerDeps, error) {
 			remoteCP, cpErr := node.NewRemoteNodeControlPlaneForNode(w1Client, req.RunID, req.NodeAddr, req.Epoch)
 			if cpErr != nil {
@@ -508,7 +509,6 @@ output "final_branch" {
 		PlanBlobKey:  meta.Key,
 		PlanSHA256:   meta.SHA256,
 		RequiredArch: "linux/amd64",
-		TempRoot:     filepath.Join(rootDir, "worker-tmp"),
 	})
 	require.NoError(t, err)
 	assert.True(t, startResp.Accepted)
@@ -616,6 +616,7 @@ output "final_branch" {
 		NodeReporter:      &itNodeOutcomeReporter{client: w2Client},
 		MergeReporter:     &itMergeResultReporter{client: w2Client},
 		HeartbeatInterval: 150 * time.Millisecond,
+		TempDir:           filepath.Join(rootDir, "worker2-tmp"),
 		NodeRunnerDepsProvider: func(_ context.Context, req runner.NodeExecutionRequest) (runner.WorkerRunnerDeps, error) {
 			remoteCP, cpErr := node.NewRemoteNodeControlPlaneForNode(w2Client, req.RunID, req.NodeAddr, req.Epoch)
 			if cpErr != nil {

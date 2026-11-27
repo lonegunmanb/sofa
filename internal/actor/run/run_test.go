@@ -17,6 +17,7 @@ import (
 	actorcfg "github.com/lonegunmanb/sofa/internal/actor/config"
 	"github.com/lonegunmanb/sofa/internal/actor/merge"
 	"github.com/lonegunmanb/sofa/internal/actor/node"
+	"github.com/lonegunmanb/sofa/internal/actor/registry"
 	"github.com/lonegunmanb/sofa/internal/actor/run"
 	"github.com/lonegunmanb/sofa/internal/artifact"
 	"github.com/lonegunmanb/sofa/internal/blob"
@@ -25,6 +26,7 @@ import (
 	"github.com/lonegunmanb/sofa/internal/plan"
 	"github.com/lonegunmanb/sofa/internal/planner"
 	corespec "github.com/lonegunmanb/sofa/internal/spec"
+	"github.com/lonegunmanb/sofa/internal/worker/daemon"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1593,6 +1595,219 @@ func (s *syncFailNodeController) StartOrResume(_ context.Context, _ string, cano
 		}, nil
 	}
 	return &node.StartOrResumeResp{Accepted: true, Epoch: 1, Status: node.StatusRunning}, nil
+}
+
+type fakeProcessLister struct {
+	mu        sync.Mutex
+	processes []registry.ProcessRecord
+	err       error
+	calls     int
+}
+
+func (f *fakeProcessLister) ListProcesses(_ context.Context, _ *registry.ListProcessesReq) (*registry.ListProcessesResp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &registry.ListProcessesResp{
+		Processes: slices.Clone(f.processes),
+	}, nil
+}
+
+type cleanupCall struct {
+	AppID string
+	Req   daemon.CleanupRunRequest
+}
+
+type fakeWorkerCleaner struct {
+	mu     sync.Mutex
+	calls  []cleanupCall
+	onCall func(ctx context.Context, appID string, req daemon.CleanupRunRequest) (daemon.CleanupRunResponse, error)
+}
+
+func (f *fakeWorkerCleaner) CleanupRun(ctx context.Context, appID string, req daemon.CleanupRunRequest) (daemon.CleanupRunResponse, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, cleanupCall{AppID: appID, Req: req})
+	fn := f.onCall
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, appID, req)
+	}
+	return daemon.CleanupRunResponse{Removed: true}, nil
+}
+
+func (f *fakeWorkerCleaner) snapshotCalls() []cleanupCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+func TestRunActor_DispatchDecoupledAndDeleteRunCleansWorkerBundles(t *testing.T) {
+	t.Parallel()
+	h := newRunHarness(t, "run-decouple-del-001")
+
+	procLister := &fakeProcessLister{
+		processes: []registry.ProcessRecord{
+			{ProcessID: "p-healthy-1", AppID: "sofa-worker-1", Status: registry.StatusHealthy},
+			{ProcessID: "p-healthy-1b", AppID: "sofa-worker-1", Status: registry.StatusHealthy}, // duplicate AppID
+			{ProcessID: "p-suspect-2", AppID: "sofa-worker-2", Status: registry.StatusSuspect},
+			{ProcessID: "p-dead-3", AppID: "sofa-worker-3", Status: registry.StatusDead},
+			{ProcessID: "p-hung-4", AppID: "sofa-worker-hung", Status: registry.StatusHealthy},
+		},
+	}
+	hungRelease := make(chan struct{})
+	defer close(hungRelease)
+	workerCleaner := &fakeWorkerCleaner{
+		onCall: func(ctx context.Context, appID string, _ daemon.CleanupRunRequest) (daemon.CleanupRunResponse, error) {
+			if appID == "sofa-worker-hung" {
+				select {
+				case <-ctx.Done():
+					return daemon.CleanupRunResponse{}, ctx.Err()
+				case <-hungRelease:
+				}
+			}
+			if appID == "sofa-worker-2" {
+				return daemon.CleanupRunResponse{}, errors.New("suspect worker unreachable")
+			}
+			return daemon.CleanupRunResponse{Removed: true}, nil
+		},
+	}
+
+	cpBundleRoot := filepath.Join(t.TempDir(), "cp-bundles")
+	h.runActor = run.NewRunActor(run.RunOptions{
+		BlobStore:            h.blobStore,
+		BundleCacheRoot:      cpBundleRoot,
+		NodeController:       h.nodeCtrl,
+		MergeController:      h.mergeCtrl,
+		OperatorIndex:        &operatorAdapter{op: h.opActor},
+		ConfigManager:        h.cfgMgr,
+		EventPublisher:       h.events,
+		ReminderScheduler:    h.remSched,
+		GitAdapter:           h.gitAdapter,
+		ProcessLister:        procLister,
+		WorkerCleaner:        workerCleaner,
+		WorkerCleanupTimeout: 80 * time.Millisecond,
+	})
+	h.runActor.SetID(h.runID)
+	h.runActor.SetStateManager(h.runSM)
+	h.runClient = run.NewDirectRunClient(h.runActor)
+
+	meta, _ := buildAndStoreSofaPlan(t, h.ctx, h.blobStore, h.runID, map[string]string{
+		"main.sofa.hcl": `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "ghcr.io/example/go:1.27"
+}
+
+harness "copilot" {}
+
+worker "w1" {
+  based_source  = source.project.branch
+  model         = "gpt-5"
+  system_prompt = "W1"
+}
+
+module "sub" {
+  source      = "./modules/sub"
+  base_branch = worker.w1.work_branch
+}
+
+merge "final" {
+  based_source = source.project.branch
+  sources      = [worker.w1.work_branch]
+}
+`,
+		"modules/sub/main.sofa.hcl": `
+variable "base_branch" {
+  type = string
+}
+
+worker "child" {
+  based_source  = var.base_branch
+  model         = "gpt-5"
+  system_prompt = "Child"
+}
+
+merge "sub_merge" {
+  based_source = var.base_branch
+  sources      = [worker.child.work_branch]
+}
+
+output "child_branch" {
+  value = merge.sub_merge.work_branch
+}
+`,
+	})
+
+	startResp, err := h.runClient.StartRun(h.ctx, &run.StartRunReq{
+		RunID:       h.runID,
+		PlanBlobKey: meta.Key,
+		PlanSHA256:  meta.SHA256,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, run.RunStatusRunning, startResp.Status)
+
+	w1Req := h.nodeCtrl.snapshot(h.runID, "worker.w1").lastReq
+	require.NotNil(t, w1Req)
+	assert.Equal(t, meta.Key, w1Req.PlanBlobKey)
+	assert.Equal(t, meta.SHA256, w1Req.PlanSHA256)
+	assert.Equal(t, "config", w1Req.BundlePath)
+
+	w1Branch := git.WorkBranchName(h.runID, "worker.w1")
+	h.completeNode(t, "worker.w1", w1Branch, shaW1, nil)
+
+	childReq := h.nodeCtrl.snapshot(h.runID, "module.sub.worker.child").lastReq
+	require.NotNil(t, childReq)
+	assert.Equal(t, meta.Key, childReq.PlanBlobKey)
+	assert.Equal(t, meta.SHA256, childReq.PlanSHA256)
+	assert.Equal(t, "modules/sub", childReq.BundlePath)
+
+	childBranch := git.WorkBranchName(h.runID, "module.sub.worker.child")
+	h.completeNode(t, "module.sub.worker.child", childBranch, shaW2, nil)
+
+	enq := h.mergeCtrl.enqueuedSnapshots()
+	require.Len(t, enq, 2)
+	byMerge := make(map[string]merge.EnqueueCandidateReq, len(enq))
+	for _, e := range enq {
+		byMerge[e.MergeNodeAddr] = e
+	}
+	assert.Equal(t, meta.Key, byMerge["merge.final"].PlanBlobKey)
+	assert.Equal(t, meta.SHA256, byMerge["merge.final"].PlanSHA256)
+	assert.Equal(t, "config", byMerge["merge.final"].BundlePath)
+	assert.Equal(t, meta.Key, byMerge["module.sub.merge.sub_merge"].PlanBlobKey)
+	assert.Equal(t, meta.SHA256, byMerge["module.sub.merge.sub_merge"].PlanSHA256)
+	assert.Equal(t, "modules/sub", byMerge["module.sub.merge.sub_merge"].BundlePath)
+
+	// No worker cleanup before DeleteRun.
+	assert.Empty(t, workerCleaner.snapshotCalls())
+
+	// DeleteRun invokes cleanup_run on HEALTHY/SUSPECT unique AppIDs, skips DEAD, ignores suspect errors, and bounds hung worker wait.
+	delStart := time.Now()
+	delResp, err := h.runClient.DeleteRun(h.ctx, &run.DeleteRunReq{})
+	require.NoError(t, err)
+	assert.True(t, delResp.Deleted)
+	assert.Less(t, time.Since(delStart), 1*time.Second, "DeleteRun must not block indefinitely on hung workers")
+
+	calls := workerCleaner.snapshotCalls()
+	gotAppIDs := make([]string, 0, len(calls))
+	for _, c := range calls {
+		assert.Equal(t, h.runID, c.Req.RunID)
+		gotAppIDs = append(gotAppIDs, c.AppID)
+	}
+	assert.ElementsMatch(t, []string{"sofa-worker-1", "sofa-worker-2", "sofa-worker-hung"}, gotAppIDs)
+	assert.NotContains(t, gotAppIDs, "sofa-worker-3")
+
+	// Control-plane extraction dir must also be removed.
+	entries, err := os.ReadDir(cpBundleRoot)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }
 
 func TestRunActor_SyncStartOrResumeFailedTransitionsRunToFailed(t *testing.T) {

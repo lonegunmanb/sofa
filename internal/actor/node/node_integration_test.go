@@ -371,6 +371,7 @@ func TestNodeActorAndRemoteControlPlane_RealDaprPauseAndCrossEpochResume(t *test
 		BlobStore:         blobStore,
 		NodeReporter:      &daprNodeOutcomeReporter{client: wClient},
 		HeartbeatInterval: 250 * time.Millisecond,
+		TempDir:           filepath.Join(rootDir, "worker-tmp"),
 		NodeRunnerDepsProvider: func(_ context.Context, req runner.NodeExecutionRequest) (runner.WorkerRunnerDeps, error) {
 			remoteCP, cpErr := node.NewRemoteNodeControlPlaneForNode(wClient, req.RunID, req.NodeAddr, req.Epoch)
 			if cpErr != nil {
@@ -452,7 +453,6 @@ func TestNodeActorAndRemoteControlPlane_RealDaprPauseAndCrossEpochResume(t *test
 		BasedSource:     "main",
 		BaseSHA:         baseSHA,
 		RequiredArch:    "linux/amd64",
-		TempRoot:        filepath.Join(rootDir, "worker-tmp"),
 		Sandboxes: map[string]sandboxspec.SandboxConfig{
 			"sandbox.alpine": {Runtime: "podman", Image: "alpine:latest", Network: "bridge"},
 		},
