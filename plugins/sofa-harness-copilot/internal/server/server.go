@@ -332,7 +332,20 @@ func (s *Server) OpenSession(ctx context.Context, req *harnessv1.OpenSessionRequ
 		}, nil
 	}
 
-	childEnv := buildChildEnv(os.Environ(), req.GetHarnessEnv())
+	copilotHome := EnsureCopilotHome()
+	harnessEnv := maps.Clone(req.GetHarnessEnv())
+	if harnessEnv == nil {
+		harnessEnv = make(map[string]string)
+	}
+	if strings.TrimSpace(harnessEnv["COPILOT_HOME"]) == "" {
+		if storeDir := strings.TrimSpace(req.GetSessionStoreDirectory()); storeDir != "" {
+			harnessEnv["COPILOT_HOME"] = storeDir
+		} else if copilotHome != "" {
+			harnessEnv["COPILOT_HOME"] = copilotHome
+		}
+	}
+
+	childEnv := buildChildEnv(os.Environ(), harnessEnv)
 	client, err := s.clientFactory(cliPath, childEnv)
 	if err != nil {
 		return &harnessv1.OpenSessionResponse{Error: classifyError(err)}, nil
@@ -768,7 +781,41 @@ func (s *Server) deleteSession(id string) (*managedSession, bool) {
 	return m, ok
 }
 
+// EnsureCopilotHome ensures COPILOT_HOME is set to a writable directory in the
+// plugin host process so copilot-sdk/go embeddedcli extracts runtime binaries into
+// <COPILOT_HOME>/cache/copilot-sdk rather than a non-existent or read-only dir.
+func EnsureCopilotHome() string {
+	home := strings.TrimSpace(os.Getenv("COPILOT_HOME"))
+	if home == "" {
+		home = filepath.Join(os.TempDir(), "sofa-copilot")
+		_ = os.Setenv("COPILOT_HOME", home)
+	}
+	_ = os.MkdirAll(home, 0o700)
+	return home
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return env[i][len(prefix):]
+		}
+	}
+	return ""
+}
+
 func (s *Server) resolveCLIPath(optionsJSON []byte) (string, error) {
+	var opts struct {
+		CLIPath    string `json:"cli_path"`
+		UsePathCLI bool   `json:"use_path_cli"`
+	}
+	if len(optionsJSON) > 0 {
+		_ = json.Unmarshal(optionsJSON, &opts)
+	}
+	if trimmed := strings.TrimSpace(opts.CLIPath); trimmed != "" {
+		return trimmed, nil
+	}
+
 	if s.execPath != nil {
 		if exePath, err := s.execPath(); err == nil && strings.TrimSpace(exePath) != "" {
 			bundled := filepath.Join(filepath.Dir(exePath), "bin", "copilot")
@@ -778,22 +825,16 @@ func (s *Server) resolveCLIPath(optionsJSON []byte) (string, error) {
 		}
 	}
 
-	if len(optionsJSON) > 0 {
-		var opts map[string]any
-		if err := json.Unmarshal(optionsJSON, &opts); err == nil {
-			if raw, ok := opts["cli_path"].(string); ok && strings.TrimSpace(raw) != "" {
-				return strings.TrimSpace(raw), nil
+	if opts.UsePathCLI {
+		if s.lookPath != nil {
+			if found, err := s.lookPath("copilot"); err == nil && strings.TrimSpace(found) != "" {
+				return strings.TrimSpace(found), nil
 			}
 		}
+		return "", errors.New("copilot CLI binary not found on PATH (use_path_cli=true)")
 	}
 
-	if s.lookPath != nil {
-		if found, err := s.lookPath("copilot"); err == nil && strings.TrimSpace(found) != "" {
-			return found, nil
-		}
-	}
-
-	return "", errors.New("copilot CLI binary not found at <execDir>/bin/copilot, options.cli_path, or PATH")
+	return "", nil
 }
 
 func buildChildEnv(baseEnv []string, harnessEnv map[string]string) []string {

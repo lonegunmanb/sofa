@@ -69,20 +69,29 @@ func TestCLIPathDiscoveryPrecedenceAndHarnessEnvIsolation(t *testing.T) {
 	t.Setenv(sentinelKey, "")
 	_ = os.Unsetenv(sentinelKey)
 
-	t.Run("prefers bundled bin/copilot next to executable", func(t *testing.T) {
+	t.Run("defaults to empty cliPath for embeddedcli even if LookPath is available", func(t *testing.T) {
 		tmp := t.TempDir()
 		exePath := filepath.Join(tmp, "sofa-harness-copilot")
-		bundledCLI := filepath.Join(tmp, "bin", "copilot")
-		require.NoError(t, os.MkdirAll(filepath.Dir(bundledCLI), 0o755))
 		require.NoError(t, os.WriteFile(exePath, []byte("exe"), 0o755))
-		require.NoError(t, os.WriteFile(bundledCLI, []byte("cli"), 0o755))
+
+		copilotHome := filepath.Join(tmp, "copilot-home-unset")
+		t.Setenv("COPILOT_HOME", "")
+		_ = os.Unsetenv("COPILOT_HOME")
+		t.Setenv("TMP", tmp)
+		t.Setenv("TEMP", tmp)
+		t.Setenv("TMPDIR", tmp)
+		_ = copilotHome
 
 		var gotPath string
 		var gotEnv []string
+		lookPathCalled := false
 		fc := &fakeSDKClient{}
 		srv := New(
 			WithExecutablePath(func() (string, error) { return exePath, nil }),
-			WithLookPath(func(string) (string, error) { return "/usr/bin/copilot", nil }),
+			WithLookPath(func(string) (string, error) {
+				lookPathCalled = true
+				return "/usr/bin/copilot", nil
+			}),
 			WithClientFactory(func(cliPath string, env []string) (sdkClient, error) {
 				gotPath = cliPath
 				gotEnv = slices.Clone(env)
@@ -91,20 +100,85 @@ func TestCLIPathDiscoveryPrecedenceAndHarnessEnvIsolation(t *testing.T) {
 		)
 
 		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:  "s-cli-default",
+			Model:      "gpt-5",
+			HarnessEnv: map[string]string{sentinelKey: "secret-gh-token"},
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetError())
+		assert.Empty(t, gotPath, "default OpenSession must pass empty cliPath to delegate to embeddedcli")
+		assert.False(t, lookPathCalled, "LookPath must not be called unless options.use_path_cli is true")
+		assert.Contains(t, gotEnv, sentinelKey+"=secret-gh-token")
+		_, leaked := os.LookupEnv(sentinelKey)
+		assert.False(t, leaked, "HarnessEnv must NEVER be written to plugin process env via os.Setenv")
+
+		resolvedHostHome := os.Getenv("COPILOT_HOME")
+		assert.NotEmpty(t, resolvedHostHome, "OpenSession must ensure COPILOT_HOME is set for embeddedcli")
+		info, statErr := os.Stat(resolvedHostHome)
+		require.NoError(t, statErr)
+		assert.True(t, info.IsDir())
+		assert.Contains(t, gotEnv, "COPILOT_HOME="+resolvedHostHome)
+	})
+
+	t.Run("prefers explicit options cli_path over bundled bin/copilot", func(t *testing.T) {
+		tmp := t.TempDir()
+		exePath := filepath.Join(tmp, "sofa-harness-copilot")
+		bundledCLI := filepath.Join(tmp, "bin", "copilot")
+		require.NoError(t, os.MkdirAll(filepath.Dir(bundledCLI), 0o755))
+		require.NoError(t, os.WriteFile(exePath, []byte("exe"), 0o755))
+		require.NoError(t, os.WriteFile(bundledCLI, []byte("cli"), 0o755))
+
+		var gotPath string
+		fc := &fakeSDKClient{}
+		srv := New(
+			WithExecutablePath(func() (string, error) { return exePath, nil }),
+			WithLookPath(func(string) (string, error) { return "/usr/bin/copilot", nil }),
+			WithClientFactory(func(cliPath string, _ []string) (sdkClient, error) {
+				gotPath = cliPath
+				return fc, nil
+			}),
+		)
+
+		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
 			SessionId:          "s-cli-1",
 			Model:              "gpt-5",
-			HarnessEnv:         map[string]string{sentinelKey: "secret-gh-token"},
-			HarnessOptionsJson: []byte(`{"cli_path":"/opt/override/copilot"}`),
+			HarnessOptionsJson: []byte(`{"cli_path":"  /opt/override/copilot  "}`),
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetError())
+		assert.Equal(t, "/opt/override/copilot", gotPath)
+	})
+
+	t.Run("uses bundled bin/copilot when options cli_path is absent", func(t *testing.T) {
+		tmp := t.TempDir()
+		exePath := filepath.Join(tmp, "sofa-harness-copilot")
+		bundledCLI := filepath.Join(tmp, "bin", "copilot")
+		require.NoError(t, os.MkdirAll(filepath.Dir(bundledCLI), 0o755))
+		require.NoError(t, os.WriteFile(exePath, []byte("exe"), 0o755))
+		require.NoError(t, os.WriteFile(bundledCLI, []byte("cli"), 0o755))
+
+		var gotPath string
+		fc := &fakeSDKClient{}
+		srv := New(
+			WithExecutablePath(func() (string, error) { return exePath, nil }),
+			WithLookPath(func(string) (string, error) { return "/usr/bin/copilot", nil }),
+			WithClientFactory(func(cliPath string, _ []string) (sdkClient, error) {
+				gotPath = cliPath
+				return fc, nil
+			}),
+		)
+
+		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:          "s-cli-bundled",
+			Model:              "gpt-5",
+			HarnessOptionsJson: []byte(`{"cli_path":"   "}`),
 		})
 		require.NoError(t, err)
 		require.Nil(t, resp.GetError())
 		assert.Equal(t, bundledCLI, gotPath)
-		assert.Contains(t, gotEnv, sentinelKey+"=secret-gh-token")
-		_, leaked := os.LookupEnv(sentinelKey)
-		assert.False(t, leaked, "HarnessEnv must NEVER be written to plugin process env via os.Setenv")
 	})
 
-	t.Run("falls back to options cli_path then LookPath", func(t *testing.T) {
+	t.Run("uses LookPath only when use_path_cli is true", func(t *testing.T) {
 		tmp := t.TempDir()
 		exePath := filepath.Join(tmp, "sofa-harness-copilot")
 
@@ -113,28 +187,58 @@ func TestCLIPathDiscoveryPrecedenceAndHarnessEnvIsolation(t *testing.T) {
 		srv := New(
 			WithExecutablePath(func() (string, error) { return exePath, nil }),
 			WithLookPath(func(string) (string, error) { return "/usr/local/bin/copilot", nil }),
-			WithClientFactory(func(cliPath string, env []string) (sdkClient, error) {
+			WithClientFactory(func(cliPath string, _ []string) (sdkClient, error) {
 				gotPath = cliPath
 				return fc, nil
 			}),
 		)
 
 		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
-			SessionId:          "s-cli-2",
+			SessionId:          "s-cli-path",
 			Model:              "gpt-5",
-			HarnessOptionsJson: []byte(`{"cli_path":"/opt/custom/copilot"}`),
+			HarnessOptionsJson: []byte(`{"use_path_cli":true}`),
 		})
 		require.NoError(t, err)
 		require.Nil(t, resp.GetError())
-		assert.Equal(t, "/opt/custom/copilot", gotPath)
+		assert.Equal(t, "/usr/local/bin/copilot", gotPath)
 
-		resp2, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
-			SessionId: "s-cli-3",
-			Model:     "gpt-5",
+		srvMissing := New(
+			WithExecutablePath(func() (string, error) { return exePath, nil }),
+			WithLookPath(func(string) (string, error) { return "", errors.New("not found") }),
+			WithClientFactory(func(string, []string) (sdkClient, error) { return fc, nil }),
+		)
+		respMissing, err := srvMissing.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:          "s-cli-path-missing",
+			Model:              "gpt-5",
+			HarnessOptionsJson: []byte(`{"use_path_cli":true}`),
 		})
 		require.NoError(t, err)
-		require.Nil(t, resp2.GetError())
-		assert.Equal(t, "/usr/local/bin/copilot", gotPath)
+		require.NotNil(t, respMissing.GetError())
+		assert.Contains(t, respMissing.GetError().GetMessage(), "use_path_cli")
+	})
+
+	t.Run("propagates SessionStoreDirectory to child COPILOT_HOME without mutating host COPILOT_HOME", func(t *testing.T) {
+		hostHome := filepath.Join(t.TempDir(), "host-copilot")
+		t.Setenv("COPILOT_HOME", hostHome)
+
+		var gotEnv []string
+		fc := &fakeSDKClient{}
+		srv := New(
+			WithClientFactory(func(_ string, env []string) (sdkClient, error) {
+				gotEnv = slices.Clone(env)
+				return fc, nil
+			}),
+		)
+
+		resp, err := srv.OpenSession(t.Context(), &harnessv1.OpenSessionRequest{
+			SessionId:             "s-store-dir",
+			Model:                 "gpt-5",
+			SessionStoreDirectory: "/.sofa/session-store",
+		})
+		require.NoError(t, err)
+		require.Nil(t, resp.GetError())
+		assert.Equal(t, hostHome, os.Getenv("COPILOT_HOME"))
+		assert.Contains(t, gotEnv, "COPILOT_HOME=/.sofa/session-store")
 	})
 }
 

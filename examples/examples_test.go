@@ -204,3 +204,50 @@ func TestInstallLocalPluginsOutputLayoutMatchesHarnessInstaller(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, agEntryInfo.Mode().IsRegular())
 }
+
+func TestInstallLocalPluginsDefaultBundlerModeWithSeededCache(t *testing.T) {
+	t.Parallel()
+
+	root := repoRootDir(t)
+	pluginDir := filepath.Join(t.TempDir(), "plugins")
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	bundlerCacheDir := filepath.Join(cacheDir, "copilot-bundler-linux-amd64")
+	require.NoError(t, os.MkdirAll(bundlerCacheDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(bundlerCacheDir, "zcopilot_linux_amd64.go"),
+		[]byte("package main\n\nimport (\n\t_ \"github.com/github/copilot-sdk/go/embeddedcli\"\n\t_ \"github.com/klauspost/compress/zstd\"\n)\n\nfunc init() {}\n"),
+		0o644,
+	))
+
+	cmd := exec.Command(
+		"go", "run", "./scripts/install-local-plugins.go",
+		"-only", "copilot",
+		"-arch", "amd64",
+		"-plugin-dir", pluginDir,
+		"-cache-dir", cacheDir,
+	)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "install-local-plugins.go default bundler mode failed: %s", string(out))
+
+	inst := installer.NewInstaller()
+	prepared, err := inst.Prepare(
+		context.Background(),
+		harnessspec.HarnessConfig{Name: "copilot"},
+		installer.Platform{OS: "linux", Arch: "amd64"},
+		installer.ResolveOptions{PluginDir: pluginDir},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "/.sofa/harness/sofa-harness-copilot", prepared.ContainerPath)
+
+	entryInfo, err := os.Lstat(filepath.Join(prepared.HostDir, "sofa-harness-copilot"))
+	require.NoError(t, err)
+	assert.True(t, entryInfo.Mode().IsRegular())
+	assert.Zero(t, entryInfo.Mode()&os.ModeSymlink)
+
+	_, binErr := os.Lstat(filepath.Join(prepared.HostDir, "bin"))
+	assert.True(t, os.IsNotExist(binErr), "default bundler mode must not create bin/copilot sidecar directory")
+
+	_, workingTreeZcopilotErr := os.Lstat(filepath.Join(root, "plugins", "sofa-harness-copilot", "cmd", "sofa-harness-copilot", "zcopilot_linux_amd64.go"))
+	assert.True(t, os.IsNotExist(workingTreeZcopilotErr), "build-bundle.go must never pollute working tree with zcopilot_* files")
+}

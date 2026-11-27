@@ -11,13 +11,13 @@ This template runs a heterogeneous self-hosting pipeline on **sofa**:
 
 ## 1. Install Local Linux Dual Plugins
 
-From the `sofa` repository root, cross-build and install both `sofa-harness-copilot` and `sofa-harness-antigravity` for your Podman Linux VM into `~/.sofa/plugins` (or pass `-plugin-dir ./.sofa/plugins`):
+From the `sofa` repository root, cross-build and install both `sofa-harness-copilot` (self-contained via `copilot-sdk/go`'s official `bundler`, requiring zero Node.js/`npm` installation) and `sofa-harness-antigravity` for your Podman Linux VM into `~/.sofa/plugins` (or pass `-plugin-dir ./.sofa/plugins`):
 
 ```bash
 go run ./scripts/install-local-plugins.go
 ```
 
-*(Optional flags: `-arch amd64|arm64`, `-plugin-dir <dir>`, `-copilot-linux-bin <path>`, `-skip-antigravity-sdk`.)*
+*(Optional flags: `-arch amd64|arm64`, `-plugin-dir <dir>`, `-cache-dir <dir>`, `-copilot-linux-bin <path>`, `-skip-antigravity-sdk`.)*
 
 ---
 

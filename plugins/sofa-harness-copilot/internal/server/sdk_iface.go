@@ -31,6 +31,7 @@ type sdkSession interface {
 
 func defaultClientFactory(cliPath string, env []string) (sdkClient, error) {
 	client := sdk.NewClient(&sdk.ClientOptions{
+		BaseDirectory: envValue(env, "COPILOT_HOME"),
 		Connection: sdk.StdioConnection{
 			Path: cliPath,
 			Env:  env,

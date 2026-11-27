@@ -6,5 +6,6 @@ import (
 )
 
 func main() {
+	server.EnsureCopilotHome()
 	harnessplugin.Serve(server.New())
 }

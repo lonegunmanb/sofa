@@ -7,8 +7,6 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"errors"
 	"flag"
@@ -40,10 +38,10 @@ func run() error {
 
 	pluginDirFlag := flag.String("plugin-dir", defaultPluginDir, "destination plugin root directory")
 	archFlag := flag.String("arch", "", "target Linux container architecture (amd64 or arm64; auto-detected when empty)")
-	runtimeBinFlag := flag.String("runtime-bin", "podman", "container runtime binary for platform detection and fallback npm pack")
-	copilotBinFlag := flag.String("copilot-linux-bin", "", "path to a pre-downloaded Linux copilot binary (skips npm pack)")
-	copilotSrcFlag := flag.String("copilot-src", "", "Go package or local stub path to cross-compile as bin/copilot")
-	cacheDirFlag := flag.String("cache-dir", filepath.Join(".sofa", "cache"), "cache directory for extracted Linux @github/copilot binary")
+	runtimeBinFlag := flag.String("runtime-bin", "podman", "container runtime binary for platform detection")
+	copilotBinFlag := flag.String("copilot-linux-bin", "", "path to a pre-downloaded Linux copilot binary (overrides copilot-sdk bundler)")
+	copilotSrcFlag := flag.String("copilot-src", "", "Go package or local stub path to cross-compile as bin/copilot (overrides copilot-sdk bundler)")
+	cacheDirFlag := flag.String("cache-dir", filepath.Join(".sofa", "cache"), "cache directory for copilot-sdk bundler artifacts")
 	skipAntigravitySDKFlag := flag.Bool("skip-antigravity-sdk", false, "pass --skip-sdk to build_linux_bundle.py")
 	onlyFlag := flag.String("only", "", "optional filter: copilot or antigravity (empty installs both)")
 	flag.Parse()
@@ -82,7 +80,7 @@ func run() error {
 	fmt.Printf("Target platform: linux/%s\nPlugin dir: %s\n", arch, pluginDir)
 
 	if only == "" || only == "copilot" {
-		if err := buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, strings.TrimSpace(*runtimeBinFlag), strings.TrimSpace(*copilotBinFlag), strings.TrimSpace(*copilotSrcFlag)); err != nil {
+		if err := buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, strings.TrimSpace(*copilotBinFlag), strings.TrimSpace(*copilotSrcFlag)); err != nil {
 			return fmt.Errorf("install sofa-harness-copilot: %w", err)
 		}
 	}
@@ -140,7 +138,7 @@ func resolveTargetArch(explicit, runtimeBin string) (string, error) {
 	return "amd64", nil
 }
 
-func buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, runtimeBin, copilotBin, copilotSrc string) error {
+func buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, copilotBin, copilotSrc string) error {
 	const exeName = "sofa-harness-copilot"
 	pluginBase := filepath.Join(pluginDir, exeName)
 	if err := os.MkdirAll(pluginBase, 0o755); err != nil {
@@ -159,6 +157,7 @@ func buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, runtimeBin, cop
 		"-arch", arch,
 	}
 
+	hasSidecarOverride := copilotSrc != "" || copilotBin != ""
 	if copilotSrc != "" {
 		compiledBin, cleanup, handledLocal, err := tryCompileLocalCopilotStub(repoRoot, stageParent, copilotSrc, arch)
 		if err != nil {
@@ -170,12 +169,14 @@ func buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, runtimeBin, cop
 		} else {
 			buildArgs = append(buildArgs, "-copilotsrc", copilotSrc)
 		}
-	} else {
-		resolvedBin, err := resolveCopilotLinuxBinary(cacheDir, arch, runtimeBin, copilotBin)
+	} else if copilotBin != "" {
+		resolvedBin, err := validateExplicitCopilotBin(copilotBin)
 		if err != nil {
 			return err
 		}
 		buildArgs = append(buildArgs, "-copilotbin", resolvedBin)
+	} else {
+		buildArgs = append(buildArgs, "-cache-dir", cacheDir)
 	}
 
 	copilotModuleDir := filepath.Join(repoRoot, "plugins", exeName)
@@ -201,8 +202,10 @@ func buildAndInstallCopilot(repoRoot, pluginDir, cacheDir, arch, runtimeBin, cop
 	if err := verifyRegularEntrypoint(destDir, exeName); err != nil {
 		return err
 	}
-	if err := verifyRegularEntrypoint(filepath.Join(destDir, "bin"), "copilot"); err != nil {
-		return err
+	if hasSidecarOverride {
+		if err := verifyRegularEntrypoint(filepath.Join(destDir, "bin"), "copilot"); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("Installed %s -> %s\n", exeName, destDir)
 	return nil
@@ -258,138 +261,19 @@ func tryCompileLocalCopilotStub(repoRoot, stageParent, copilotSrc, arch string) 
 	return outBin, func() { _ = os.Remove(outBin) }, true, nil
 }
 
-func resolveCopilotLinuxBinary(cacheDir, arch, runtimeBin, explicitBin string) (string, error) {
-	if explicitBin != "" {
-		abs, err := filepath.Abs(explicitBin)
-		if err != nil {
-			return "", fmt.Errorf("resolve -copilot-linux-bin %q: %w", explicitBin, err)
-		}
-		info, err := os.Lstat(abs)
-		if err != nil {
-			return "", fmt.Errorf("inspect -copilot-linux-bin %q: %w", abs, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
-			return "", fmt.Errorf("-copilot-linux-bin %q must be a non-empty regular file", abs)
-		}
-		return abs, nil
-	}
-
-	cachedPath := filepath.Join(cacheDir, "copilot-linux-"+arch, "copilot")
-	if info, err := os.Lstat(cachedPath); err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() && info.Size() > 0 {
-		fmt.Printf("Using cached Linux copilot binary at %s\n", cachedPath)
-		return cachedPath, nil
-	}
-
-	npmPkg := "@github/copilot-linux-x64"
-	if arch == "arm64" {
-		npmPkg = "@github/copilot-linux-arm64"
-	}
-
-	tmpDir, err := os.MkdirTemp("", "sofa-copilot-pack-*")
+func validateExplicitCopilotBin(explicitBin string) (string, error) {
+	abs, err := filepath.Abs(explicitBin)
 	if err != nil {
-		return "", fmt.Errorf("create temp pack dir: %w", err)
+		return "", fmt.Errorf("resolve -copilot-linux-bin %q: %w", explicitBin, err)
 	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	if err := fetchNpmTarball(tmpDir, npmPkg, runtimeBin); err != nil {
-		return "", err
-	}
-
-	matches, err := filepath.Glob(filepath.Join(tmpDir, "*.tgz"))
-	if err != nil || len(matches) == 0 {
-		return "", fmt.Errorf("npm pack for %s did not produce a .tgz archive in %s", npmPkg, tmpDir)
-	}
-
-	cacheSubDir := filepath.Dir(cachedPath)
-	if err := os.MkdirAll(cacheSubDir, 0o755); err != nil {
-		return "", fmt.Errorf("create cache dir %q: %w", cacheSubDir, err)
-	}
-	tmpOut := cachedPath + ".tmp"
-	if err := extractCopilotFromTgz(matches[0], tmpOut); err != nil {
-		_ = os.Remove(tmpOut)
-		return "", err
-	}
-	if err := os.Chmod(tmpOut, 0o755); err != nil {
-		_ = os.Remove(tmpOut)
-		return "", err
-	}
-	if err := os.Rename(tmpOut, cachedPath); err != nil {
-		_ = os.Remove(tmpOut)
-		return "", fmt.Errorf("cache extracted copilot binary: %w", err)
-	}
-	fmt.Printf("Cached Linux copilot binary -> %s\n", cachedPath)
-	return cachedPath, nil
-}
-
-func fetchNpmTarball(destDir, npmPkg, runtimeBin string) error {
-	npmBin := "npm"
-	if runtime.GOOS == "windows" {
-		npmBin = "npm.cmd"
-	}
-	if _, err := exec.LookPath(npmBin); err == nil {
-		cmd := exec.Command(npmBin, "pack", npmPkg)
-		cmd.Dir = destDir
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s pack %s: %w", npmBin, npmPkg, err)
-		}
-		return nil
-	}
-
-	if runtimeBin == "" {
-		runtimeBin = "podman"
-	}
-	if _, err := exec.LookPath(runtimeBin); err != nil {
-		return fmt.Errorf("neither %s nor container runtime %q is available to fetch %s", npmBin, runtimeBin, npmPkg)
-	}
-	mountSpec := destDir + ":/out"
-	cmd := exec.Command(runtimeBin, "run", "--rm", "-v", mountSpec, "-w", "/out", "docker.io/library/node:22-alpine", "npm", "pack", npmPkg)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s npm pack %s: %w", runtimeBin, npmPkg, err)
-	}
-	return nil
-}
-
-func extractCopilotFromTgz(tgzPath, destPath string) error {
-	f, err := os.Open(tgzPath)
+	info, err := os.Lstat(abs)
 	if err != nil {
-		return fmt.Errorf("open tarball %q: %w", tgzPath, err)
+		return "", fmt.Errorf("inspect -copilot-linux-bin %q: %w", abs, err)
 	}
-	defer func() { _ = f.Close() }()
-
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return fmt.Errorf("open gzip stream %q: %w", tgzPath, err)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+		return "", fmt.Errorf("-copilot-linux-bin %q must be a non-empty regular file", abs)
 	}
-	defer func() { _ = gz.Close() }()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read tar entry from %q: %w", tgzPath, err)
-		}
-		cleanName := strings.TrimPrefix(filepath.ToSlash(hdr.Name), "./")
-		if hdr.Typeflag == tar.TypeReg && (cleanName == "package/copilot" || strings.HasSuffix(cleanName, "/copilot")) {
-			out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-			if err != nil {
-				return fmt.Errorf("create extracted binary %q: %w", destPath, err)
-			}
-			_, copyErr := io.Copy(out, tr)
-			closeErr := out.Close()
-			if err := errors.Join(copyErr, closeErr); err != nil {
-				return fmt.Errorf("write extracted binary %q: %w", destPath, err)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("tarball %q did not contain package/copilot regular file", tgzPath)
+	return abs, nil
 }
 
 func buildAndInstallAntigravity(repoRoot, pluginDir, arch string, skipSDK bool) error {
