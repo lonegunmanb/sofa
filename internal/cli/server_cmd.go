@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,7 @@ import (
 	harnessinstaller "github.com/lonegunmanb/sofa/internal/harness/installer"
 	sandboxruntime "github.com/lonegunmanb/sofa/internal/sandbox/runtime"
 	"github.com/lonegunmanb/sofa/internal/server"
+	"github.com/lonegunmanb/sofa/internal/webui"
 	"github.com/lonegunmanb/sofa/internal/worker/daemon"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
 	"github.com/spf13/cobra"
@@ -272,7 +274,7 @@ func runDevServer(ctx context.Context, cmd *cobra.Command, opts Options, cfg dev
 		DevMode:      true,
 		Backend:      server.NewDaprBackend(cpClientProvider),
 		BlobStore:    blobStore,
-		UIHandler:    opts.UIHandler,
+		UIHandler:    resolveUIHandler(opts.UIHandler),
 		RunDefaults: server.RunStartDefaults{
 			RequiredArch:   platform.Key(),
 			HostOS:         runtime.GOOS,
@@ -436,7 +438,7 @@ func runDistributedServer(ctx context.Context, cmd *cobra.Command, opts Options,
 		DevMode:      false,
 		Backend:      server.NewDaprBackend(cpClientProvider),
 		BlobStore:    blobStore,
-		UIHandler:    opts.UIHandler,
+		UIHandler:    resolveUIHandler(opts.UIHandler),
 		RunDefaults: server.RunStartDefaults{
 			RequiredArch:   platform.Key(),
 			HostOS:         runtime.GOOS,
@@ -518,6 +520,13 @@ func registerControlPlaneActors(
 			GitAdapter:      git.NewCLIAdapter(git.CLIAdapterOptions{}),
 		})
 	})
+}
+
+func resolveUIHandler(override http.Handler) http.Handler {
+	if override != nil {
+		return override
+	}
+	return webui.NewHandler()
 }
 
 func detectTargetPlatformBestEffort(ctx context.Context, eng *sandboxruntime.PodmanEngine) harnessinstaller.Platform {

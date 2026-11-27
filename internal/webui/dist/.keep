@@ -1,0 +1,1 @@
+# Keeps internal/webui/dist tracked so //go:embed all:dist always compiles even before frontend build.
