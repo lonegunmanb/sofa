@@ -61,14 +61,16 @@ type Server struct {
 	internalSvc   common.Service
 	appTokenValue atomic.Value
 
-	mu           sync.Mutex
-	started      bool
-	publicLn     net.Listener
-	publicHTTP   *http.Server
-	publicAddr   string
-	internalAddr string
-	internalErr  chan error
-	publicErr    chan error
+	mu              sync.Mutex
+	started         bool
+	publicStarted   bool
+	internalStarted bool
+	publicLn        net.Listener
+	publicHTTP      *http.Server
+	publicAddr      string
+	internalAddr    string
+	internalErr     chan error
+	publicErr       chan error
 }
 
 // New validates security invariants and builds the dual-port Server without binding sockets yet.
@@ -288,14 +290,50 @@ func (s *Server) VerifyPreviewTicket(ticket, runID, artifactID string) error {
 	return s.ticketSigner.verify(ticket, runID, artifactID)
 }
 
+// StartInternal begins serving only the internal Dapr callback server.
+func (s *Server) StartInternal(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startInternalLocked()
+}
+
+// StartPublic begins serving only the public HTTP/WebSocket listener.
+func (s *Server) StartPublic(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startPublicLocked()
+}
+
 // Start begins serving the public HTTP/WebSocket listener and, when configured, the internal Dapr callback server.
 func (s *Server) Start(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.started {
+	if s.started || s.publicStarted || s.internalStarted {
 		return errors.New("server: already started")
 	}
 
+	if err := s.startPublicLocked(); err != nil {
+		return err
+	}
+	if err := s.startInternalLocked(); err != nil {
+		if s.publicHTTP != nil {
+			_ = s.publicHTTP.Close()
+		}
+		s.publicStarted = false
+		s.started = false
+		s.publicLn = nil
+		s.publicHTTP = nil
+		return err
+	}
+
+	s.started = true
+	return nil
+}
+
+func (s *Server) startPublicLocked() error {
+	if s.publicStarted {
+		return errors.New("server: public listener already started")
+	}
 	ln, err := net.Listen("tcp", s.cfg.PublicAddr)
 	if err != nil {
 		return fmt.Errorf("server: listen public %q: %w", s.cfg.PublicAddr, err)
@@ -317,7 +355,15 @@ func (s *Server) Start(_ context.Context) error {
 	s.publicHTTP = pubHTTP
 	s.publicAddr = ln.Addr().String()
 	s.publicErr = pubErr
+	s.publicStarted = true
+	s.started = true
+	return nil
+}
 
+func (s *Server) startInternalLocked() error {
+	if s.internalStarted {
+		return errors.New("server: internal listener already started")
+	}
 	if s.internalAddr != "" && s.internalSvc != nil {
 		intErr := make(chan error, 1)
 		go func() {
@@ -328,13 +374,13 @@ func (s *Server) Start(_ context.Context) error {
 			close(intErr)
 		}()
 		if err := waitTCPReady(s.internalAddr, 5*time.Second); err != nil {
-			_ = pubHTTP.Close()
+			_ = s.internalSvc.Stop()
 			return fmt.Errorf("server: wait internal callback listener %q: %w", s.internalAddr, err)
 		}
 		s.internalErr = intErr
+		s.internalStarted = true
+		s.started = true
 	}
-
-	s.started = true
 	return nil
 }
 
@@ -344,7 +390,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.mu.Lock()
-	if !s.started {
+	if !s.started && !s.publicStarted && !s.internalStarted {
 		s.mu.Unlock()
 		s.hub.Close()
 		return nil
@@ -353,8 +399,10 @@ func (s *Server) Stop(ctx context.Context) error {
 	pubErr := s.publicErr
 	internalSvc := s.internalSvc
 	intErr := s.internalErr
-	hasInternal := s.internalAddr != ""
+	hasInternal := s.internalStarted && s.internalAddr != ""
 	s.started = false
+	s.publicStarted = false
+	s.internalStarted = false
 	s.publicLn = nil
 	s.publicHTTP = nil
 	s.mu.Unlock()

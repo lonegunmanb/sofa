@@ -261,6 +261,7 @@ type Options struct {
 	HeartbeatInterval      time.Duration
 	MaxLogBufferBytes      int64
 	TempDir                string
+	PluginDir              string
 	PubSubName             string
 	EventsTopic            string
 	OnFence                func(ctx context.Context, deadProcessID string)
@@ -660,6 +661,14 @@ func (d *WorkerDaemon) runNodeTask(
 	defer pipeline.FlushAndClose()
 
 	isolatedLookup := makeIsolatedLookupEnv(req.ResolvedEnv)
+	tempRoot := strings.TrimSpace(req.TempRoot)
+	if tempRoot == "" {
+		tempRoot = strings.TrimSpace(d.opts.TempDir)
+	}
+	pluginDir := strings.TrimSpace(req.PluginResolve.PluginDir)
+	if pluginDir == "" {
+		pluginDir = strings.TrimSpace(d.opts.PluginDir)
+	}
 
 	execReq := runner.NodeExecutionRequest{
 		RunID:          req.RunID,
@@ -682,11 +691,11 @@ func (d *WorkerDaemon) runNodeTask(
 		ToolEnvs:       req.ToolEnvs,
 		Imports:        req.Imports,
 		BundleDir:      req.BundleDir,
-		TempRoot:       req.TempRoot,
+		TempRoot:       tempRoot,
 		HostOS:         req.HostOS,
 		TargetPlatform: req.TargetPlatform,
 		PluginResolveOpts: harnessinstaller.ResolveOptions{
-			PluginDir:          req.PluginResolve.PluginDir,
+			PluginDir:          pluginDir,
 			WorkingDir:         req.PluginResolve.WorkingDir,
 			UserHomeDir:        req.PluginResolve.UserHomeDir,
 			CacheRoot:          req.PluginResolve.CacheRoot,
@@ -858,6 +867,11 @@ func (d *WorkerDaemon) runMergeTask(
 		})
 	}
 
+	tempRoot := strings.TrimSpace(req.TempRoot)
+	if tempRoot == "" {
+		tempRoot = strings.TrimSpace(d.opts.TempDir)
+	}
+
 	mergeReq := runner.MergeCandidateRequest{
 		RunID:           req.RunID,
 		MergeNodeAddr:   req.MergeNodeAddr,
@@ -875,7 +889,7 @@ func (d *WorkerDaemon) runMergeTask(
 		BundleDir:       req.BundleDir,
 		ImportsDir:      req.ImportsDir,
 		HostOS:          req.HostOS,
-		TempRoot:        req.TempRoot,
+		TempRoot:        tempRoot,
 	}
 
 	res, execErr := d.opts.MergeExecutor.ExecuteMergeCandidate(ctx, mergeReq)

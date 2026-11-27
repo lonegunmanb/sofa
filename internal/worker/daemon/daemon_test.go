@@ -727,3 +727,114 @@ func TestWorkerDaemon_RunMergeCandidateIsolatedGitEnv(t *testing.T) {
 	assert.True(t, managedOK)
 	assert.Equal(t, "managed-tok-val", managedVal)
 }
+
+func TestWorkerDaemon_DefaultsPluginDirAndTempDirFromOptions(t *testing.T) {
+	t.Parallel()
+
+	reg := &fakeRegistryClient{}
+	nodeRep := &fakeNodeReporter{}
+	mergeRep := &fakeMergeReporter{}
+
+	var (
+		mu             sync.Mutex
+		nodeReqs       []runner.NodeExecutionRequest
+		mergeTempRoots []string
+	)
+
+	d, err := daemon.New(daemon.Options{
+		ProcessID:     "proc-defaults",
+		AppID:         "sofa-worker-proc-defaults",
+		Registry:      reg,
+		NodeReporter:  nodeRep,
+		MergeReporter: mergeRep,
+		PluginDir:     "/opt/sofa/plugins",
+		TempDir:       "/var/tmp/sofa-worker",
+		NodeExecutor: funcNodeExecutor(func(_ context.Context, req runner.NodeExecutionRequest) (runner.NodeOutcome, error) {
+			mu.Lock()
+			nodeReqs = append(nodeReqs, req)
+			mu.Unlock()
+			return runner.NodeOutcome{Status: runner.StatusSucceeded}, nil
+		}),
+		MergeExecutor: funcMergeExecutor(func(_ context.Context, req runner.MergeCandidateRequest) (runner.MergeCandidateResult, error) {
+			mu.Lock()
+			mergeTempRoots = append(mergeTempRoots, req.TempRoot)
+			mu.Unlock()
+			return runner.MergeCandidateResult{
+				Status:          runner.MergeStatusSucceeded,
+				TargetBranch:    "main",
+				LatestTargetSHA: strings.Repeat("d", 40),
+				MergedCommitSHA: strings.Repeat("d", 40),
+			}, nil
+		}),
+	})
+	require.NoError(t, err)
+
+	svc := &fakeService{}
+	require.NoError(t, d.RegisterHandlers(svc))
+
+	// Empty PluginResolve.PluginDir & TempRoot should fall back to Options.PluginDir & Options.TempDir.
+	_, err = invokeFakeHandler[daemon.StartNodeRequest, daemon.StartNodeResponse](t, svc, "start_node", daemon.StartNodeRequest{
+		ProcessID: "proc-defaults",
+		LeaseID:   "lease-1",
+		RunID:     "run-def",
+		NodeAddr:  "worker.a",
+		Epoch:     1,
+		RepoURL:   "https://example.com/repo.git",
+	})
+	require.NoError(t, err)
+
+	// Explicit per-request PluginResolve.PluginDir & TempRoot must take precedence over daemon defaults.
+	_, err = invokeFakeHandler[daemon.StartNodeRequest, daemon.StartNodeResponse](t, svc, "start_node", daemon.StartNodeRequest{
+		ProcessID:     "proc-defaults",
+		LeaseID:       "lease-2",
+		RunID:         "run-def",
+		NodeAddr:      "worker.b",
+		Epoch:         1,
+		RepoURL:       "https://example.com/repo.git",
+		TempRoot:      "/custom/temp",
+		PluginResolve: daemon.PluginResolveConfig{PluginDir: "/custom/plugins"},
+	})
+	require.NoError(t, err)
+
+	_, err = invokeFakeHandler[daemon.RunMergeCandidateRequest, daemon.RunMergeCandidateResponse](t, svc, "run_merge_candidate", daemon.RunMergeCandidateRequest{
+		ProcessID:       "proc-defaults",
+		RequestID:       "mreq-def-1",
+		LeaseID:         "lease-m-1",
+		RunID:           "run-def",
+		MergeNodeAddr:   "merge.int",
+		Epoch:           1,
+		RepoURL:         "https://example.com/repo.git",
+		CandidateBranch: "sofa/work/run-def/worker.a",
+	})
+	require.NoError(t, err)
+
+	_, err = invokeFakeHandler[daemon.RunMergeCandidateRequest, daemon.RunMergeCandidateResponse](t, svc, "run_merge_candidate", daemon.RunMergeCandidateRequest{
+		ProcessID:       "proc-defaults",
+		RequestID:       "mreq-def-2",
+		LeaseID:         "lease-m-2",
+		RunID:           "run-def",
+		MergeNodeAddr:   "merge.int",
+		Epoch:           1,
+		RepoURL:         "https://example.com/repo.git",
+		CandidateBranch: "sofa/work/run-def/worker.b",
+		TempRoot:        "/custom/merge-temp",
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return len(nodeRep.Reports()) == 2 && len(mergeRep.Reports()) == 2
+	}, 2*time.Second, 15*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	byNode := make(map[string]runner.NodeExecutionRequest, len(nodeReqs))
+	for _, r := range nodeReqs {
+		byNode[r.NodeAddr] = r
+	}
+	assert.Equal(t, "/opt/sofa/plugins", byNode["worker.a"].PluginResolveOpts.PluginDir)
+	assert.Equal(t, "/var/tmp/sofa-worker", byNode["worker.a"].TempRoot)
+	assert.Equal(t, "/custom/plugins", byNode["worker.b"].PluginResolveOpts.PluginDir)
+	assert.Equal(t, "/custom/temp", byNode["worker.b"].TempRoot)
+
+	assert.ElementsMatch(t, []string{"/var/tmp/sofa-worker", "/custom/merge-temp"}, mergeTempRoots)
+}

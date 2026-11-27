@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,13 +29,14 @@ const (
 	ExitInterrupt = 130
 )
 
-// Options injects working directory, plugin fetchers, and environment lookups for offline testing.
+// Options injects working directory, plugin fetchers, UI handler, and environment lookups for offline testing.
 type Options struct {
 	WorkingDir          string
 	Fetch               module.FetchFunc
 	ReleaseFetcher      harness.ReleaseFetcher
 	AttestationVerifier harness.AttestationVerifier
 	LookupEnv           func(string) (string, bool)
+	UIHandler           http.Handler
 }
 
 type usageError struct {
@@ -121,6 +123,19 @@ func NewCommand(opts Options) *cobra.Command {
 		newInitCommand(opts),
 		newSchemaCommand(opts),
 		newPlanCommand(opts),
+		newApplyCommand(opts),
+		newServerCommand(opts),
+		newWorkerCommand(opts),
+		newEnvCommand(opts),
+		newSecretCommand(opts),
+		newRunsCommand(opts),
+		newLogsCommand(opts),
+		newPauseCommand(opts),
+		newResumeCommand(opts),
+		newRerunCommand(opts),
+		newDeleteCommand(opts),
+		newInterjectCommand(opts),
+		newDecisionsCommand(opts),
 	)
 	return root
 }
