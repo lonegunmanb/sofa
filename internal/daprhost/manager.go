@@ -52,6 +52,7 @@ type Options struct {
 	SchedulerBin          string // Optional explicit path to scheduler binary
 	DaprdBin              string // Optional explicit path to daprd binary
 	ExternalSchedulerAddr string // Optional external scheduler host:port; skips embedded scheduler launch when non-empty
+	NameResolutionDBPath  string // Optional SQLite DB path for nameresolution.sqlite across local daprd peers
 }
 
 type managedProc struct {
@@ -74,6 +75,7 @@ type Manager struct {
 	schedulerBin          string
 	daprdBin              string
 	externalSchedulerAddr string
+	nameResolutionDBPath  string
 
 	started          bool
 	schedulerPort    int
@@ -145,6 +147,7 @@ func NewManager(opts Options) (*Manager, error) {
 		schedulerBin:          schedulerBin,
 		daprdBin:              daprdBin,
 		externalSchedulerAddr: externalSched,
+		nameResolutionDBPath:  strings.TrimSpace(opts.NameResolutionDBPath),
 		httpProbeClient:       &http.Client{Timeout: 2 * time.Second},
 		readinessTimeout:      defaultReadinessTimeout,
 	}, nil
@@ -207,6 +210,43 @@ func (m *Manager) SchedulerAddress() string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(m.schedulerPort))
 }
 
+func (m *Manager) buildDaprdArgs(
+	daprHTTPPort, daprGRPCPort, daprInternalGRPCPort, daprPublicPort, daprMetricsPort int,
+	schedAddr, componentsDir, configPath string,
+) []string {
+	args := []string{
+		"--mode=standalone",
+		"--app-id=" + m.appID,
+		"--dapr-listen-addresses=127.0.0.1",
+		"--dapr-http-port=" + strconv.Itoa(daprHTTPPort),
+		"--dapr-grpc-port=" + strconv.Itoa(daprGRPCPort),
+		"--dapr-internal-grpc-listen-address=127.0.0.1",
+		"--dapr-internal-grpc-port=" + strconv.Itoa(daprInternalGRPCPort),
+		"--dapr-public-listen-address=127.0.0.1",
+		"--dapr-public-port=" + strconv.Itoa(daprPublicPort),
+		"--metrics-listen-address=127.0.0.1",
+		"--metrics-port=" + strconv.Itoa(daprMetricsPort),
+		"--enable-metrics=false",
+		"--scheduler-host-address=" + schedAddr,
+		"--resources-path=" + componentsDir,
+		"--disable-builtin-k8s-secret-store=true",
+		"--enable-mtls=false",
+		"--dapr-graceful-shutdown-seconds=2",
+		"--log-level=info",
+	}
+	if configPath != "" {
+		args = append(args, "--config="+configPath)
+	}
+	if m.appPort > 0 {
+		args = append(args,
+			"--app-port="+strconv.Itoa(m.appPort),
+			"--app-channel-address=127.0.0.1",
+			"--app-protocol=http",
+		)
+	}
+	return args
+}
+
 // Client returns the active Dapr client once Start succeeds, or nil when stopped.
 func (m *Manager) Client() daprclient.Client {
 	m.mu.Lock()
@@ -235,6 +275,13 @@ func (m *Manager) Start(ctx context.Context) (daprclient.Client, error) {
 	componentsDir, err := WriteComponents(m.stateDir, keyPath)
 	if err != nil {
 		return nil, err
+	}
+	var configPath string
+	if m.nameResolutionDBPath != "" {
+		configPath, err = WriteNameResolutionConfig(m.stateDir, m.nameResolutionDBPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	rollback := func() {
@@ -305,33 +352,16 @@ func (m *Manager) Start(ctx context.Context) (daprclient.Client, error) {
 	daprPublicPort := daprPorts[3]
 	daprMetricsPort := daprPorts[4]
 
-	daprdArgs := []string{
-		"--mode=standalone",
-		"--app-id=" + m.appID,
-		"--dapr-listen-addresses=127.0.0.1",
-		"--dapr-http-port=" + strconv.Itoa(daprHTTPPort),
-		"--dapr-grpc-port=" + strconv.Itoa(daprGRPCPort),
-		"--dapr-internal-grpc-listen-address=127.0.0.1",
-		"--dapr-internal-grpc-port=" + strconv.Itoa(daprInternalGRPCPort),
-		"--dapr-public-listen-address=127.0.0.1",
-		"--dapr-public-port=" + strconv.Itoa(daprPublicPort),
-		"--metrics-listen-address=127.0.0.1",
-		"--metrics-port=" + strconv.Itoa(daprMetricsPort),
-		"--enable-metrics=false",
-		"--scheduler-host-address=" + schedAddr,
-		"--resources-path=" + componentsDir,
-		"--disable-builtin-k8s-secret-store=true",
-		"--enable-mtls=false",
-		"--dapr-graceful-shutdown-seconds=2",
-		"--log-level=info",
-	}
-	if m.appPort > 0 {
-		daprdArgs = append(daprdArgs,
-			"--app-port="+strconv.Itoa(m.appPort),
-			"--app-channel-address=127.0.0.1",
-			"--app-protocol=http",
-		)
-	}
+	daprdArgs := m.buildDaprdArgs(
+		daprHTTPPort,
+		daprGRPCPort,
+		daprInternalGRPCPort,
+		daprPublicPort,
+		daprMetricsPort,
+		schedAddr,
+		componentsDir,
+		configPath,
+	)
 
 	childEnv := buildIsolatedEnv(os.Environ(), map[string]string{
 		"APP_API_TOKEN":  m.appAPIToken,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -205,6 +206,73 @@ func WriteComponents(stateDir, keyFilePath string) (string, error) {
 	}
 
 	return componentsDir, nil
+}
+
+type daprConfigManifest struct {
+	APIVersion string         `yaml:"apiVersion"`
+	Kind       string         `yaml:"kind"`
+	Metadata   componentMeta  `yaml:"metadata"`
+	Spec       daprConfigSpec `yaml:"spec"`
+}
+
+type daprConfigSpec struct {
+	NameResolution *nameResolutionConfig `yaml:"nameResolution,omitempty"`
+}
+
+type nameResolutionConfig struct {
+	Component     string            `yaml:"component"`
+	Version       string            `yaml:"version"`
+	Configuration map[string]string `yaml:"configuration,omitempty"`
+}
+
+// WriteNameResolutionConfig renders <stateDir>/dapr-config.yaml configuring Dapr's
+// SQLite name resolution component against dbPath so multiple local daprd instances
+// resolve each other reliably without multicast mDNS.
+func WriteNameResolutionConfig(stateDir, dbPath string) (string, error) {
+	if strings.TrimSpace(stateDir) == "" {
+		return "", errors.New("daprhost: stateDir is required")
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return "", errors.New("daprhost: NameResolutionDBPath is required")
+	}
+	absStateDir, err := filepath.Abs(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve state dir: %w", err)
+	}
+	absDBPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve name resolution db path: %w", err)
+	}
+	if err := os.MkdirAll(absStateDir, 0o700); err != nil {
+		return "", fmt.Errorf("create state directory: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(absDBPath), 0o700); err != nil {
+		return "", fmt.Errorf("create name resolution db directory: %w", err)
+	}
+
+	doc := daprConfigManifest{
+		APIVersion: "dapr.io/v1alpha1",
+		Kind:       "Configuration",
+		Metadata:   componentMeta{Name: "sofa-dapr-config"},
+		Spec: daprConfigSpec{
+			NameResolution: &nameResolutionConfig{
+				Component: "sqlite",
+				Version:   "v1",
+				Configuration: map[string]string{
+					"connectionString": filepath.ToSlash(absDBPath),
+				},
+			},
+		},
+	}
+	encoded, err := yaml.Marshal(&doc)
+	if err != nil {
+		return "", fmt.Errorf("marshal dapr-config.yaml: %w", err)
+	}
+	targetPath := filepath.Join(absStateDir, "dapr-config.yaml")
+	if err := writeRestrictedFileAtomic(absStateDir, targetPath, encoded, false); err != nil {
+		return "", fmt.Errorf("write dapr-config.yaml: %w", err)
+	}
+	return targetPath, nil
 }
 
 func writeRestrictedFileAtomic(dir, targetPath string, data []byte, applyDACL bool) error {

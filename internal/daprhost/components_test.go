@@ -323,3 +323,64 @@ func TestNewManager_ValidationAndTokens(t *testing.T) {
 	assert.Regexp(t, regexp.MustCompile(`^[0-9a-f]{64}$`), mgrCustom.DaprAPIToken())
 	assert.Equal(t, "127.0.0.1:50006", mgrCustom.SchedulerAddress())
 }
+
+func TestWriteNameResolutionConfig_AndManagerArgs(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	nrDB := filepath.Join(t.TempDir(), "nr", "nameresolution.db")
+
+	cfgPath, err := WriteNameResolutionConfig(stateDir, nrDB)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(stateDir, "dapr-config.yaml"), cfgPath)
+
+	raw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	var parsed struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+		Metadata   struct {
+			Name string `yaml:"name"`
+		} `yaml:"metadata"`
+		Spec struct {
+			NameResolution struct {
+				Component     string `yaml:"component"`
+				Version       string `yaml:"version"`
+				Configuration struct {
+					ConnectionString string `yaml:"connectionString"`
+				} `yaml:"configuration"`
+			} `yaml:"nameResolution"`
+		} `yaml:"spec"`
+	}
+	require.NoError(t, yaml.Unmarshal(raw, &parsed))
+	assert.Equal(t, "dapr.io/v1alpha1", parsed.APIVersion)
+	assert.Equal(t, "Configuration", parsed.Kind)
+	assert.Equal(t, "sofa-dapr-config", parsed.Metadata.Name)
+	assert.Equal(t, "sqlite", parsed.Spec.NameResolution.Component)
+	assert.Equal(t, "v1", parsed.Spec.NameResolution.Version)
+	assert.Equal(t, filepath.ToSlash(nrDB), parsed.Spec.NameResolution.Configuration.ConnectionString)
+
+	_, err = WriteNameResolutionConfig(stateDir, "   ")
+	require.Error(t, err)
+
+	binDir := t.TempDir()
+	fakeDaprd := filepath.Join(binDir, "daprd")
+	require.NoError(t, os.WriteFile(fakeDaprd, []byte("x"), 0o700))
+	mgr, err := NewManager(Options{
+		StateDir:              stateDir,
+		AppID:                 "sofa-worker-nr",
+		AppPort:               8081,
+		DaprdBin:              fakeDaprd,
+		ExternalSchedulerAddr: "127.0.0.1:50006",
+		NameResolutionDBPath:  nrDB,
+	})
+	require.NoError(t, err)
+	argsWithConfig := mgr.buildDaprdArgs(1, 2, 3, 4, 5, "127.0.0.1:50006", filepath.Join(stateDir, "components"), cfgPath)
+	assert.Contains(t, argsWithConfig, "--config="+cfgPath)
+
+	argsWithoutConfig := mgr.buildDaprdArgs(1, 2, 3, 4, 5, "127.0.0.1:50006", filepath.Join(stateDir, "components"), "")
+	for _, a := range argsWithoutConfig {
+		assert.NotContains(t, a, "--config=")
+	}
+}
