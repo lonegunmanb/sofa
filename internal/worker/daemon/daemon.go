@@ -89,6 +89,7 @@ type NodeResultReporter interface {
 
 // MergeOutcomeReport delivers completed or failed merge candidate outcomes back to MergeActor.
 type MergeOutcomeReport struct {
+	MergeActorID    string                      `json:"merge_actor_id,omitempty"`
 	RequestID       string                      `json:"request_id"`
 	RunID           string                      `json:"run_id"`
 	MergeNodeAddr   string                      `json:"merge_node_addr"`
@@ -193,6 +194,7 @@ type AbortMergeResponse struct {
 // RunMergeCandidateRequest is the control-plane dispatch payload for worker "run_merge_candidate".
 type RunMergeCandidateRequest struct {
 	ProcessID       string                        `json:"process_id,omitempty"`
+	MergeActorID    string                        `json:"merge_actor_id,omitempty"`
 	RequestID       string                        `json:"request_id"`
 	LeaseID         string                        `json:"lease_id"`
 	LeaseKey        string                        `json:"lease_key,omitempty"`
@@ -205,6 +207,7 @@ type RunMergeCandidateRequest struct {
 	TargetBranch    *string                       `json:"target_branch,omitempty"`
 	CandidateBranch string                        `json:"candidate_branch"`
 	Auth            git.AuthConfig                `json:"auth,omitempty"`
+	ResolvedEnv     map[string]string             `json:"resolved_env,omitempty"`
 	Sandbox         sandboxspec.SandboxConfig     `json:"sandbox"`
 	Gatekeepers     []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
 	BundleDir       string                        `json:"bundle_dir,omitempty"`
@@ -848,6 +851,13 @@ func (d *WorkerDaemon) runMergeTask(
 	defer cancel()
 	defer d.removeMergeTask(requestID, generation)
 
+	gitAdapter := d.opts.GitAdapter
+	if gitAdapter == nil {
+		gitAdapter = git.NewCLIAdapter(git.CLIAdapterOptions{
+			LookupEnv: makeIsolatedLookupEnv(req.ResolvedEnv),
+		})
+	}
+
 	mergeReq := runner.MergeCandidateRequest{
 		RunID:           req.RunID,
 		MergeNodeAddr:   req.MergeNodeAddr,
@@ -860,7 +870,7 @@ func (d *WorkerDaemon) runMergeTask(
 		Auth:            req.Auth,
 		Sandbox:         req.Sandbox,
 		Gatekeepers:     req.Gatekeepers,
-		GitAdapter:      d.opts.GitAdapter,
+		GitAdapter:      gitAdapter,
 		SandboxEngine:   d.opts.SandboxEngine,
 		BundleDir:       req.BundleDir,
 		ImportsDir:      req.ImportsDir,
@@ -875,6 +885,7 @@ func (d *WorkerDaemon) runMergeTask(
 
 	if d.opts.MergeReporter != nil {
 		report := MergeOutcomeReport{
+			MergeActorID:    req.MergeActorID,
 			RequestID:       req.RequestID,
 			RunID:           req.RunID,
 			MergeNodeAddr:   req.MergeNodeAddr,

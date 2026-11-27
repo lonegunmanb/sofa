@@ -14,6 +14,7 @@ import (
 	"github.com/dapr/go-sdk/service/common"
 	"github.com/lonegunmanb/sofa/internal/actor/registry"
 	"github.com/lonegunmanb/sofa/internal/blob"
+	"github.com/lonegunmanb/sofa/internal/git"
 	harnessruntime "github.com/lonegunmanb/sofa/internal/harness/runtime"
 	"github.com/lonegunmanb/sofa/internal/worker/daemon"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
@@ -658,4 +659,71 @@ func TestWorkerDaemon_AbortMergeIdempotentAndFlagged(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, abortDup.Aborted)
+}
+
+func TestWorkerDaemon_RunMergeCandidateIsolatedGitEnv(t *testing.T) {
+	t.Setenv("HOST_GIT_TOKEN", "host-secret-must-not-leak")
+
+	reg := &fakeRegistryClient{}
+	mergeRep := &fakeMergeReporter{}
+
+	var (
+		hostOK      bool
+		hostVal     string
+		managedOK   bool
+		managedVal  string
+		adapterUsed bool
+	)
+
+	d, err := daemon.New(daemon.Options{
+		ProcessID:     "proc-merge-env",
+		AppID:         "sofa-worker-proc-merge-env",
+		Registry:      reg,
+		MergeReporter: mergeRep,
+		MergeExecutor: funcMergeExecutor(func(_ context.Context, req runner.MergeCandidateRequest) (runner.MergeCandidateResult, error) {
+			cli, ok := req.GitAdapter.(*git.CLIAdapter)
+			require.True(t, ok, "expected default git.CLIAdapter when Options.GitAdapter is nil")
+			require.NotNil(t, cli.LookupEnv, "LookupEnv on default git.CLIAdapter must never be nil")
+			adapterUsed = true
+			hostVal, hostOK = cli.LookupEnv("HOST_GIT_TOKEN")
+			managedVal, managedOK = cli.LookupEnv("MANAGED_GIT_TOKEN")
+			return runner.MergeCandidateResult{
+				Status:          runner.MergeStatusSucceeded,
+				TargetBranch:    "main",
+				LatestTargetSHA: strings.Repeat("c", 40),
+				MergedCommitSHA: strings.Repeat("c", 40),
+			}, nil
+		}),
+	})
+	require.NoError(t, err)
+
+	svc := &fakeService{}
+	require.NoError(t, d.RegisterHandlers(svc))
+
+	tokRef := "MANAGED_GIT_TOKEN"
+	resp, err := invokeFakeHandler[daemon.RunMergeCandidateRequest, daemon.RunMergeCandidateResponse](t, svc, "run_merge_candidate", daemon.RunMergeCandidateRequest{
+		ProcessID:       "proc-merge-env",
+		RequestID:       "mreq-env-1",
+		LeaseID:         "lease-m-env",
+		RunID:           "run-m-env",
+		MergeNodeAddr:   "merge.int",
+		Epoch:           1,
+		RepoURL:         "https://example.com/repo.git",
+		CandidateBranch: "sofa/work/run-m-env/w1",
+		Auth:            git.AuthConfig{TokenRef: &tokRef},
+		ResolvedEnv: map[string]string{
+			"MANAGED_GIT_TOKEN": "managed-tok-val",
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, resp.Accepted)
+
+	require.Eventually(t, func() bool {
+		return len(mergeRep.Reports()) == 1
+	}, 2*time.Second, 15*time.Millisecond)
+	assert.True(t, adapterUsed)
+	assert.False(t, hostOK, "host os.Environ secret must not leak into merge GitAdapter")
+	assert.Empty(t, hostVal)
+	assert.True(t, managedOK)
+	assert.Equal(t, "managed-tok-val", managedVal)
 }
