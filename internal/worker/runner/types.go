@@ -31,7 +31,7 @@ import (
 )
 
 // DefaultMaxGatekeeperReworks bounds deterministic gatekeeper rework loops when not overridden.
-const DefaultMaxGatekeeperReworks = 3
+const DefaultMaxGatekeeperReworks = workerspec.DefaultMaxGatekeeperReworks
 
 // DefaultMaxArtifactReworks bounds post-freeze artifact validation rework loops.
 const DefaultMaxArtifactReworks = 3

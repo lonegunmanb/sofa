@@ -818,10 +818,7 @@ func decodeWorkerConfigFromPlanVal(val cty.Value, scope string) (workerspec.Conf
 	if cfg.Imports, err = decodeImportsFromPlanMap(attrOrNil(val, "imports"), false); err != nil {
 		return workerspec.Config{}, fmt.Errorf("%s: %w", scope, err)
 	}
-	if cfg.Gatekeepers, err = decodeGatekeepersFromPlanVal(attrOrNil(val, "gatekeepers"), scope); err != nil {
-		return workerspec.Config{}, err
-	}
-	if cfg.QC, err = decodeQCFromPlanVal(attrOrNil(val, "qc"), scope); err != nil {
+	if cfg.QC, err = decodeQCFromPlanVal(attrOrNil(val, "qc"), nil, scope); err != nil {
 		return workerspec.Config{}, err
 	}
 	if cfg.Fallbacks, err = decodeFallbacksFromPlanList(attrOrNil(val, "fallbacks")); err != nil {
@@ -968,20 +965,13 @@ func decodeWorkerConfigFromDeferredObject(val cty.Value, planned workerspec.Conf
 		}
 		cfg.ToolUses = uses
 	}
-	if hasAttr(val, "gatekeeper") {
-		gks, err := decodeGatekeepersFromPlanVal(val.GetAttr("gatekeeper"), scope)
-		if err != nil {
-			return workerspec.Config{}, err
-		}
-		cfg.Gatekeepers = gks
-	}
 	if hasAttr(val, "qc") {
 		qcVal := val.GetAttr("qc")
 		unmarkedQC, _ := qcVal.UnmarkDeep()
 		if unmarkedQC.IsNull() {
 			cfg.QC = nil
 		} else {
-			qc, err := decodeQCFromPlanVal(qcVal, scope)
+			qc, err := decodeQCFromPlanVal(qcVal, planned.QC, scope)
 			if err != nil {
 				return workerspec.Config{}, err
 			}
@@ -1045,6 +1035,37 @@ func validateMaterializedWorker(cfg *workerspec.Config, scope string) error {
 			if elem.IsNull() || !elem.Type().IsObjectType() || readStringAttr(elem, "kind") != "artifact" {
 				return fmt.Errorf("%s import_artifact %q sources must contain artifact objects", scope, name)
 			}
+		}
+	}
+	if cfg.QC != nil {
+		if cfg.QC.MaxGatekeeperReworks < 0 {
+			return fmt.Errorf("%s qc max_gatekeeper_reworks must be non-negative", scope)
+		}
+		for _, gk := range cfg.QC.Gatekeepers {
+			if err := workerspec.ValidateGatekeeper(gk); err != nil {
+				return fmt.Errorf("%s qc: %w", scope, err)
+			}
+		}
+		hasCriteria := false
+		if cfg.QC.Criteria != cty.NilVal {
+			unmarkedCrit, _ := cfg.QC.Criteria.UnmarkDeep()
+			if !unmarkedCrit.IsNull() {
+				if !unmarkedCrit.IsWhollyKnown() || (!unmarkedCrit.Type().IsMapType() && !unmarkedCrit.Type().IsObjectType()) {
+					return fmt.Errorf("%s qc criteria must be a known map(string)", scope)
+				}
+				if unmarkedCrit.LengthInt() > 0 {
+					for it := unmarkedCrit.ElementIterator(); it.Next(); {
+						k, v := it.Element()
+						if strings.TrimSpace(k.AsString()) == "" || v.IsNull() || !v.Type().Equals(cty.String) || strings.TrimSpace(v.AsString()) == "" {
+							return fmt.Errorf("%s qc criteria keys and values must be non-empty strings", scope)
+						}
+					}
+					hasCriteria = true
+				}
+			}
+		}
+		if !hasCriteria && len(cfg.QC.Gatekeepers) == 0 {
+			return fmt.Errorf("%s qc must declare at least one gatekeeper or non-empty criteria", scope)
 		}
 	}
 	return nil
@@ -1169,9 +1190,13 @@ func decodeGatekeepersFromPlanVal(val cty.Value, scope string) ([]workerspec.Gat
 	if unmarked.IsNull() || !unmarked.IsKnown() {
 		return nil, nil
 	}
-	decodeOne := func(name string, elem cty.Value) workerspec.GatekeeperConfig {
+	decodeOne := func(name string, elem cty.Value) (workerspec.GatekeeperConfig, error) {
 		if n := readStringAttr(elem, "name"); n != "" {
 			name = n
+		}
+		cmd, err := decodeOptionalStringSliceVal(attrOrNil(elem, "command"), scope+" gatekeeper "+name+" command")
+		if err != nil {
+			return workerspec.GatekeeperConfig{}, err
 		}
 		expectCode := 0
 		if code, ok := readOptionalIntAttr(elem, "expect_exit_code"); ok {
@@ -1179,12 +1204,12 @@ func decodeGatekeepersFromPlanVal(val cty.Value, scope string) ([]workerspec.Gat
 		}
 		return workerspec.GatekeeperConfig{
 			Name:             name,
-			Command:          readStringSliceAttr(elem, "command"),
+			Command:          cmd,
 			WorkingDir:       defaultNonEmpty(readStringAttr(elem, "working_dir"), "."),
 			Timeout:          defaultNonEmpty(readStringAttr(elem, "timeout"), "10m"),
 			ExpectExitCode:   expectCode,
 			RequireCleanTree: readBoolAttr(elem, "require_clean_worktree", true),
-		}
+		}, nil
 	}
 	switch {
 	case unmarked.Type().IsListType() || unmarked.Type().IsTupleType():
@@ -1194,7 +1219,11 @@ func decodeGatekeepersFromPlanVal(val cty.Value, scope string) ([]workerspec.Gat
 		out := make([]workerspec.GatekeeperConfig, 0, unmarked.LengthInt())
 		for it := val.ElementIterator(); it.Next(); {
 			_, elem := it.Element()
-			out = append(out, decodeOne("", elem))
+			gk, err := decodeOne("", elem)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, gk)
 		}
 		return out, nil
 	case unmarked.Type().IsObjectType() || unmarked.Type().IsMapType():
@@ -1205,7 +1234,11 @@ func decodeGatekeepersFromPlanVal(val cty.Value, scope string) ([]workerspec.Gat
 		sort.Strings(names)
 		out := make([]workerspec.GatekeeperConfig, 0, len(names))
 		for _, name := range names {
-			out = append(out, decodeOne(name, getMapOrAttr(val, name)))
+			gk, err := decodeOne(name, getMapOrAttr(val, name))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, gk)
 		}
 		return out, nil
 	default:
@@ -1213,7 +1246,7 @@ func decodeGatekeepersFromPlanVal(val cty.Value, scope string) ([]workerspec.Gat
 	}
 }
 
-func decodeQCFromPlanVal(val cty.Value, scope string) (*workerspec.QCConfig, error) {
+func decodeQCFromPlanVal(val cty.Value, plannedQC *workerspec.QCConfig, scope string) (*workerspec.QCConfig, error) {
 	if val == cty.NilVal {
 		return nil, nil
 	}
@@ -1225,31 +1258,69 @@ func decodeQCFromPlanVal(val cty.Value, scope string) (*workerspec.QCConfig, err
 	if n, ok := readOptionalIntAttr(val, "max_qc_rounds"); ok {
 		maxRounds = n
 	}
+	maxGKReworks := workerspec.DefaultMaxGatekeeperReworks
+	maxGKReworksSet := false
+	if hasAttr(val, "max_gatekeeper_reworks") {
+		n, set, err := optionalWholeIntVal(val.GetAttr("max_gatekeeper_reworks"), scope+" qc max_gatekeeper_reworks")
+		if err != nil {
+			return nil, err
+		}
+		if set {
+			if n < 0 {
+				return nil, fmt.Errorf("%s qc max_gatekeeper_reworks must be non-negative", scope)
+			}
+			maxGKReworks = n
+			maxGKReworksSet = readBoolAttr(val, "max_gatekeeper_reworks_set", true)
+		}
+	}
+	var gatekeepers []workerspec.GatekeeperConfig
+	var err error
+	if hasAttr(val, "gatekeepers") {
+		gatekeepers, err = decodeGatekeepersFromPlanVal(val.GetAttr("gatekeepers"), scope+" qc")
+		if err != nil {
+			return nil, err
+		}
+	} else if hasAttr(val, "gatekeeper") {
+		gatekeepers, err = decodeGatekeepersFromPlanVal(val.GetAttr("gatekeeper"), scope+" qc")
+		if err != nil {
+			return nil, err
+		}
+		if plannedQC != nil && len(plannedQC.Gatekeepers) > 0 && len(gatekeepers) > 0 {
+			byName := make(map[string]workerspec.GatekeeperConfig, len(gatekeepers))
+			for _, gk := range gatekeepers {
+				byName[gk.Name] = gk
+			}
+			gatekeepers = orderByPlannedNames(byName, plannedQC.Gatekeepers, func(g workerspec.GatekeeperConfig) string { return g.Name })
+		}
+	}
 	criteria := attrOrNil(val, "criteria")
-	if criteria == cty.NilVal {
+	if criteria == cty.NilVal || criteria.IsNull() {
 		criteria = cty.MapValEmpty(cty.String)
 	}
 	mp := defaultNullObject(attrOrNil(val, "model_provider"))
 	mpSet := readBoolAttr(val, "model_provider_set", hasAttr(val, "model_provider"))
 	return &workerspec.QCConfig{
-		Criteria:         criteria,
-		Sandbox:          defaultNullObject(attrOrNil(val, "sandbox")),
-		Harness:          defaultNullObject(attrOrNil(val, "harness")),
-		ModelProvider:    mp,
-		ModelProviderSet: mpSet,
-		Model:            readStringAttr(val, "model"),
-		Profile:          readStringAttr(val, "profile"),
-		ReasoningEffort:  readStringAttr(val, "reasoning_effort"),
-		Permission:       readStringAttr(val, "permission"),
-		MaxQCRounds:      maxRounds,
-		ToolIDs:          readStringSliceAttr(val, "tool_ids"),
-		ToolCallQuota:    readOptionalIntMap(attrOrNil(val, "tool_call_quota")),
-		AllowedTools:     readOptionalStringSlice(attrOrNil(val, "allowed_tools")),
-		DisallowedTools:  readOptionalStringSlice(attrOrNil(val, "disallowed_tools")),
-		SkillDirectories: readStringSliceAttr(val, "skill_directories"),
-		Skills:           readStringSliceAttr(val, "skills"),
-		DisabledSkills:   readStringSliceAttr(val, "disabled_skills"),
-		Retry:            decodeRetryOverrideFromPlanConfig(attrOrNil(val, "retry")),
+		Criteria:                criteria,
+		Sandbox:                 defaultNullObject(attrOrNil(val, "sandbox")),
+		Harness:                 defaultNullObject(attrOrNil(val, "harness")),
+		ModelProvider:           mp,
+		ModelProviderSet:        mpSet,
+		Model:                   readStringAttr(val, "model"),
+		Profile:                 readStringAttr(val, "profile"),
+		ReasoningEffort:         readStringAttr(val, "reasoning_effort"),
+		Permission:              readStringAttr(val, "permission"),
+		MaxQCRounds:             maxRounds,
+		MaxGatekeeperReworks:    maxGKReworks,
+		MaxGatekeeperReworksSet: maxGKReworksSet,
+		Gatekeepers:             gatekeepers,
+		ToolIDs:                 readStringSliceAttr(val, "tool_ids"),
+		ToolCallQuota:           readOptionalIntMap(attrOrNil(val, "tool_call_quota")),
+		AllowedTools:            readOptionalStringSlice(attrOrNil(val, "allowed_tools")),
+		DisallowedTools:         readOptionalStringSlice(attrOrNil(val, "disallowed_tools")),
+		SkillDirectories:        readStringSliceAttr(val, "skill_directories"),
+		Skills:                  readStringSliceAttr(val, "skills"),
+		DisabledSkills:          readStringSliceAttr(val, "disabled_skills"),
+		Retry:                   decodeRetryOverrideFromPlanConfig(attrOrNil(val, "retry")),
 	}, nil
 }
 

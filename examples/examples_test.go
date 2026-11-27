@@ -111,21 +111,21 @@ func TestCopilotAgySelfHostExampleCompilesAndRoundTripsPlan(t *testing.T) {
 	assert.True(t, summaryArt.Required)
 	assert.True(t, summaryArt.NonEmpty)
 
-	require.Len(t, workerCfg.Gatekeepers, 1)
-	gk := workerCfg.Gatekeepers[0]
-	assert.Equal(t, "go_quality", gk.Name)
-	assert.True(t, gk.RequireCleanTree)
-	joinedCmd := strings.Join(gk.Command, " ")
-	assert.Contains(t, joinedCmd, "gofmt")
-	assert.Contains(t, joinedCmd, "go vet ./...")
-	assert.Contains(t, joinedCmd, "go test ./... -count=1")
-
 	require.NotNil(t, workerCfg.QC, "worker.implement_slice must configure qc")
 	assert.Equal(t, "sandbox.qc_audit", workerCfg.QC.Sandbox.GetAttr("address").AsString())
 	assert.Equal(t, "harness.antigravity", workerCfg.QC.Harness.GetAttr("address").AsString())
 	assert.True(t, workerCfg.QC.ModelProviderSet)
 	assert.True(t, workerCfg.QC.ModelProvider == cty.NilVal || workerCfg.QC.ModelProvider.IsNull())
 	assert.Greater(t, workerCfg.QC.Criteria.LengthInt(), 0)
+
+	require.Len(t, workerCfg.QC.Gatekeepers, 1)
+	gk := workerCfg.QC.Gatekeepers[0]
+	assert.Equal(t, "go_quality", gk.Name)
+	assert.True(t, gk.RequireCleanTree)
+	joinedCmd := strings.Join(gk.Command, " ")
+	assert.Contains(t, joinedCmd, "gofmt")
+	assert.Contains(t, joinedCmd, "go vet ./...")
+	assert.Contains(t, joinedCmd, "go test ./... -count=1")
 
 	outputs := planned.Outputs()
 	assert.Contains(t, outputs, "work_branch")

@@ -75,8 +75,10 @@ dynamic_worker "verify_notifications" {
       system_prompt = "Verify single notification check."
       prompt        = "Verify ${check.key}: ${check.value.rule}"
 
-      gatekeeper "test" {
-        command = ["go", "test", "./..."]
+      qc {
+        gatekeeper "test" {
+          command = ["go", "test", "./..."]
+        }
       }
     }
   }
@@ -411,10 +413,12 @@ dynamic_worker "verify" {
       model         = "gpt-5"
       system_prompt = "verify ${check.key}"
 
-      dynamic "gatekeeper" {
-        for_each = toset(["unit"])
-        content "unit" {
-          command = ["go", "test", "./..."]
+      qc {
+        dynamic "gatekeeper" {
+          for_each = toset(["unit"])
+          content "unit" {
+            command = ["go", "test", "./..."]
+          }
         }
       }
 

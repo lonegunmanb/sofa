@@ -11,55 +11,69 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
-const DefaultMaxQCRounds = 3
+const (
+	DefaultMaxQCRounds          = 3
+	DefaultMaxGatekeeperReworks = 3
+)
 
 var (
 	qcAllowedAttrs = map[string]struct{}{
-		"criteria":          {},
-		"sandbox":           {},
-		"harness":           {},
-		"model_provider":    {},
-		"model":             {},
-		"profile":           {},
-		"reasoning_effort":  {},
-		"permission":        {},
-		"max_qc_rounds":     {},
-		"tool_ids":          {},
-		"tool_call_quota":   {},
-		"allowed_tools":     {},
-		"disallowed_tools":  {},
-		"skill_directories": {},
-		"skills":            {},
-		"disabled_skills":   {},
+		"criteria":               {},
+		"sandbox":                {},
+		"harness":                {},
+		"model_provider":         {},
+		"model":                  {},
+		"profile":                {},
+		"reasoning_effort":       {},
+		"permission":             {},
+		"max_qc_rounds":          {},
+		"max_gatekeeper_reworks": {},
+		"tool_ids":               {},
+		"tool_call_quota":        {},
+		"allowed_tools":          {},
+		"disallowed_tools":       {},
+		"skill_directories":      {},
+		"skills":                 {},
+		"disabled_skills":        {},
 	}
 	qcAllowedNested = map[string]struct{}{
-		"retry": {},
+		"retry":      {},
+		"gatekeeper": {},
 	}
 )
 
 type QCConfig struct {
-	Criteria         cty.Value
-	Sandbox          cty.Value
-	Harness          cty.Value
-	ModelProvider    cty.Value
-	ModelProviderSet bool
-	Model            string
-	Profile          string
-	ReasoningEffort  string
-	Permission       string
-	MaxQCRounds      int
-	ToolIDs          []string
-	ToolCallQuota    map[string]int
-	AllowedTools     []string
-	DisallowedTools  []string
-	SkillDirectories []string
-	Skills           []string
-	DisabledSkills   []string
-	Retry            provider.RetryOverride
+	Criteria                cty.Value
+	Sandbox                 cty.Value
+	Harness                 cty.Value
+	ModelProvider           cty.Value
+	ModelProviderSet        bool
+	Model                   string
+	Profile                 string
+	ReasoningEffort         string
+	Permission              string
+	MaxQCRounds             int
+	MaxGatekeeperReworks    int
+	MaxGatekeeperReworksSet bool
+	Gatekeepers             []GatekeeperConfig
+	ToolIDs                 []string
+	ToolCallQuota           map[string]int
+	AllowedTools            []string
+	DisallowedTools         []string
+	SkillDirectories        []string
+	Skills                  []string
+	DisabledSkills          []string
+	Retry                   provider.RetryOverride
 }
 
 func (q QCConfig) Clone() QCConfig {
 	cloned := q
+	if q.Gatekeepers != nil {
+		cloned.Gatekeepers = make([]GatekeeperConfig, len(q.Gatekeepers))
+		for i, g := range q.Gatekeepers {
+			cloned.Gatekeepers[i] = g.Clone()
+		}
+	}
 	cloned.ToolIDs = slices.Clone(q.ToolIDs)
 	cloned.ToolCallQuota = maps.Clone(q.ToolCallQuota)
 	cloned.AllowedTools = slices.Clone(q.AllowedTools)
@@ -71,7 +85,7 @@ func (q QCConfig) Clone() QCConfig {
 	return cloned
 }
 
-func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
+func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext, deferred *bool) (QCConfig, error) {
 	if len(block.Labels) != 0 {
 		return QCConfig{}, fail("worker qc block does not accept labels")
 	}
@@ -79,25 +93,44 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 		return QCConfig{}, err
 	}
 
-	criteriaAttr, ok := block.Attributes()["criteria"]
-	if !ok {
-		return QCConfig{}, fail("qc criteria is required")
-	}
-	criteria, diags := criteriaAttr.Expr.Value(ctx)
-	if diags.HasErrors() {
-		return QCConfig{}, diags
-	}
-	unmarkedCriteria, _ := criteria.UnmarkDeep()
-	if !unmarkedCriteria.IsWhollyKnown() || unmarkedCriteria.IsNull() ||
-		(!unmarkedCriteria.Type().IsMapType() && !unmarkedCriteria.Type().IsObjectType()) ||
-		unmarkedCriteria.LengthInt() == 0 {
-		return QCConfig{}, fail("qc criteria must be a known non-empty map(string)")
-	}
-	for iterator := unmarkedCriteria.ElementIterator(); iterator.Next(); {
-		key, value := iterator.Element()
-		if value.IsNull() || !value.Type().Equals(cty.String) ||
-			strings.TrimSpace(value.AsString()) == "" || strings.TrimSpace(key.AsString()) == "" {
-			return QCConfig{}, fail("qc criteria keys and values must be non-empty strings")
+	criteria := cty.MapValEmpty(cty.String)
+	hasCriteria := false
+	if criteriaAttr, ok := block.Attributes()["criteria"]; ok {
+		val, diags := criteriaAttr.Expr.Value(ctx)
+		if diags.HasErrors() {
+			return QCConfig{}, diags
+		}
+		unmarkedCriteria, _ := val.UnmarkDeep()
+		if !unmarkedCriteria.IsNull() {
+			vt := unmarkedCriteria.Type()
+			if !unmarkedCriteria.IsKnown() {
+				if deferred == nil || (!vt.IsMapType() && !vt.IsObjectType() && vt != cty.DynamicPseudoType) {
+					return QCConfig{}, fail("qc criteria must be a known non-empty map(string)")
+				}
+				*deferred = true
+			} else {
+				if (!vt.IsMapType() && !vt.IsObjectType()) || unmarkedCriteria.LengthInt() == 0 {
+					return QCConfig{}, fail("qc criteria must be a known non-empty map(string)")
+				}
+				for iterator := unmarkedCriteria.ElementIterator(); iterator.Next(); {
+					key, value := iterator.Element()
+					if strings.TrimSpace(key.AsString()) == "" {
+						return QCConfig{}, fail("qc criteria keys and values must be non-empty strings")
+					}
+					if !value.IsKnown() {
+						if deferred == nil || (!value.Type().Equals(cty.String) && value.Type() != cty.DynamicPseudoType) {
+							return QCConfig{}, fail("qc criteria must be a known non-empty map(string)")
+						}
+						*deferred = true
+						continue
+					}
+					if value.IsNull() || !value.Type().Equals(cty.String) || strings.TrimSpace(value.AsString()) == "" {
+						return QCConfig{}, fail("qc criteria keys and values must be non-empty strings")
+					}
+				}
+			}
+			criteria = val
+			hasCriteria = true
 		}
 	}
 
@@ -109,12 +142,26 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 		return QCConfig{}, fail("qc max_qc_rounds must be positive")
 	}
 
+	maxGKReworks := DefaultMaxGatekeeperReworks
+	maxGKReworksPtr, maxGKReworksSet, err := optionalWholeIntPtr(block, ctx, "max_gatekeeper_reworks", "qc")
+	if err != nil {
+		return QCConfig{}, err
+	}
+	if maxGKReworksSet {
+		if *maxGKReworksPtr < 0 {
+			return QCConfig{}, fail("qc max_gatekeeper_reworks must be non-negative")
+		}
+		maxGKReworks = *maxGKReworksPtr
+	}
+
 	result := QCConfig{
-		Criteria:      criteria,
-		Sandbox:       cty.NullVal(cty.EmptyObject),
-		Harness:       cty.NullVal(cty.EmptyObject),
-		ModelProvider: cty.NullVal(cty.EmptyObject),
-		MaxQCRounds:   maxRounds,
+		Criteria:                criteria,
+		Sandbox:                 cty.NullVal(cty.EmptyObject),
+		Harness:                 cty.NullVal(cty.EmptyObject),
+		ModelProvider:           cty.NullVal(cty.EmptyObject),
+		MaxQCRounds:             maxRounds,
+		MaxGatekeeperReworks:    maxGKReworks,
+		MaxGatekeeperReworksSet: maxGKReworksSet,
 	}
 
 	if model, set, err := optionalKnownString(block, ctx, "model", "qc"); err != nil {
@@ -197,9 +244,24 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 	}
 
 	var retryBlocks []*golden.HclBlock
+	gatekeeperNames := map[string]struct{}{}
 	for _, nested := range block.NestedBlocks() {
-		if nested.Type == "retry" {
+		switch nested.Type {
+		case "retry":
 			retryBlocks = append(retryBlocks, nested)
+		case "gatekeeper":
+			gk, hasUnknown, err := decodeGatekeeper(nested, ctx, deferred != nil)
+			if err != nil {
+				return QCConfig{}, err
+			}
+			if hasUnknown && deferred != nil {
+				*deferred = true
+			}
+			if _, exists := gatekeeperNames[gk.Name]; exists {
+				return QCConfig{}, fail("qc gatekeeper %q is declared more than once", gk.Name)
+			}
+			gatekeeperNames[gk.Name] = struct{}{}
+			result.Gatekeepers = append(result.Gatekeepers, gk)
 		}
 	}
 	if len(retryBlocks) > 1 {
@@ -210,6 +272,9 @@ func decodeQC(block *golden.HclBlock, ctx *hcl.EvalContext) (QCConfig, error) {
 		if err != nil {
 			return QCConfig{}, err
 		}
+	}
+	if !hasCriteria && len(result.Gatekeepers) == 0 {
+		return QCConfig{}, fail("qc block must declare at least one gatekeeper or non-empty criteria")
 	}
 	return result, nil
 }

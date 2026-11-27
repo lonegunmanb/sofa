@@ -549,9 +549,6 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 			Artifacts: map[string]workerspec.Artifact{
 				"report": {Name: "report", Type: "file", Path: "report.json", Description: "report", Required: true, NonEmpty: true},
 			},
-			Gatekeepers: []workerspec.GatekeeperConfig{
-				{Name: "unit", Command: []string{"go", "test", "./..."}, WorkingDir: ".", Timeout: "5m", ExpectExitCode: 0, RequireCleanTree: true},
-			},
 			QC: &workerspec.QCConfig{
 				Criteria:         cty.MapVal(map[string]cty.Value{"quality": cty.StringVal("must pass")}),
 				Sandbox:          baseSandboxRef("qc"),
@@ -560,6 +557,9 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 				ModelProvider:    cty.NullVal(cty.EmptyObject),
 				Model:            "gemini-2.5-pro",
 				MaxQCRounds:      2,
+				Gatekeepers: []workerspec.GatekeeperConfig{
+					{Name: "unit", Command: []string{"go", "test", "./..."}, WorkingDir: ".", Timeout: "5m", ExpectExitCode: 0, RequireCleanTree: true},
+				},
 			},
 		},
 	})
@@ -1091,8 +1091,10 @@ func TestWorkerRunnerGatekeeperExhaustedFallback(t *testing.T) {
 			Worker: workerspec.Config{
 				Sandbox: baseSandboxRef("work"), Harness: baseHarnessRef("copilot"),
 				Model: "gpt-5", SystemPrompt: cty.StringVal("sys"), Prompt: cty.StringVal("go"),
-				Gatekeepers: []workerspec.GatekeeperConfig{{Name: "unit", Command: []string{"go", "test"}, WorkingDir: ".", Timeout: "1m"}},
-				Fallbacks:   fallbacks,
+				QC: &workerspec.QCConfig{
+					Gatekeepers: []workerspec.GatekeeperConfig{{Name: "unit", Command: []string{"go", "test"}, WorkingDir: ".", Timeout: "1m"}},
+				},
+				Fallbacks: fallbacks,
 			},
 		})
 		require.NoError(t, err)
@@ -1331,5 +1333,208 @@ func TestExecuteMergeCandidateTier1(t *testing.T) {
 		require.Equal(t, shaCkpt1, res.LatestTargetSHA)
 		require.Equal(t, []string{"shared.go"}, res.ConflictFiles)
 		require.Empty(t, fakeGit.pushedCommits)
+	})
+}
+
+func TestWorkerRunnerQCNestedGatekeeperBehavior(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("gatekeeper runs in qc.sandbox (fallback work sandbox), skips LLM QC on failure, and reruns after QC revise", func(t *testing.T) {
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+		fakeGit := newFakeGitAdapter(shaBase)
+		fakeGit.nextCommitSHAs = []string{shaCkpt1}
+
+		var timeline []string
+		gkEngine := &mockSandboxEngine{
+			timeline: &timeline,
+			failures: []*sandboxruntime.GatekeeperFailure{
+				{Name: "unit", Command: []string{"go", "test"}, ExitCode: 1, Stderr: "fail-1"},
+				nil, // Work iteration 1 passes gatekeeper -> QC Round 1 (revise)
+				nil, // Work iteration 2 (after QC revise) reruns gatekeeper and passes -> QC Round 2 (pass)
+			},
+		}
+		makeWork := func(id string) func(string, runner.SessionLaunchRequest) harnessruntime.Opener {
+			return func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+					return &scriptedSession{id: id, cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+						invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+						return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+					}}, nil
+				}}
+			}
+		}
+		makeQC := func(decision string) func(string, runner.SessionLaunchRequest) harnessruntime.Opener {
+			return func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+					return &scriptedSession{id: "qc-" + decision, cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+						if decision == "revise" {
+							invokeToolMustOK(t, cfg, session.ToolSofaQCOpenIssues, map[string]any{
+								"issues": []map[string]any{{"criterion": "c", "code": "bad", "message": "fix me"}},
+							})
+						} else {
+							invokeToolMustOK(t, cfg, session.ToolSofaQCResolveIssues, map[string]any{
+								"ids": []string{"QC-001"}, "resolution_evidence": "fixed",
+							})
+						}
+						invokeToolMustOK(t, cfg, session.ToolSofaQCSubmitVerdict, map[string]any{"decision": decision, "summary": decision})
+						return harnessruntime.TurnSummary{FinalContent: decision}, nil
+					}}, nil
+				}}
+			}
+		}
+
+		launcher := &scriptedSessionLauncher{
+			timeline: &timeline,
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				makeWork("w"),
+				makeWork("w"),
+				makeQC("revise"),
+				makeWork("w"),
+				makeQC("pass"),
+			},
+		}
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: gkEngine, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-qc-gk", NodeAddr: "worker.impl", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			MaxGatekeeperReworks: 1,
+			Worker: workerspec.Config{
+				Sandbox: baseSandboxRef("work"), Harness: baseHarnessRef("copilot"),
+				Model: "gpt-5", SystemPrompt: cty.StringVal("sys"), Prompt: cty.StringVal("go"),
+				QC: &workerspec.QCConfig{
+					Sandbox:                 baseSandboxRef("qc"),
+					Criteria:                cty.MapVal(map[string]cty.Value{"c": cty.StringVal("ok")}),
+					MaxQCRounds:             2,
+					MaxGatekeeperReworks:    2,
+					MaxGatekeeperReworksSet: true,
+					Gatekeepers:             []workerspec.GatekeeperConfig{{Name: "unit", Command: []string{"go", "test"}, WorkingDir: ".", Timeout: "1m"}},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusSucceeded, out.Status)
+		require.Equal(t, []string{
+			"launch:work", "close:work", "gatekeeper",
+			"launch:work", "close:work", "gatekeeper",
+			"launch:qc", "close:qc",
+			"launch:work", "close:work", "gatekeeper",
+			"launch:qc", "close:qc",
+		}, timeline)
+		require.Len(t, gkEngine.calls, 3)
+		for _, call := range gkEngine.calls {
+			assert.Equal(t, "alpine:latest", call.Sandbox.Image, "gatekeeper must run in qc.sandbox")
+		}
+	})
+
+	t.Run("gatekeeper-only qc completes without QC LLM session or QC ledger", func(t *testing.T) {
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+		fakeGit := newFakeGitAdapter(shaBase)
+		fakeGit.nextCommitSHAs = []string{shaCkpt1}
+
+		var timeline []string
+		gkEngine := &mockSandboxEngine{timeline: &timeline, failures: []*sandboxruntime.GatekeeperFailure{nil}}
+		launcher := &scriptedSessionLauncher{
+			timeline: &timeline,
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						return &scriptedSession{id: "w-gk-only", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+							return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+						}}, nil
+					}}
+				},
+			},
+		}
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: gkEngine, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-gk-only", NodeAddr: "worker.impl", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			Worker: workerspec.Config{
+				Sandbox: baseSandboxRef("work"), Harness: baseHarnessRef("copilot"),
+				Model: "gpt-5", SystemPrompt: cty.StringVal("sys"), Prompt: cty.StringVal("go"),
+				QC: &workerspec.QCConfig{
+					Gatekeepers: []workerspec.GatekeeperConfig{{Name: "unit", Command: []string{"go", "test"}, WorkingDir: ".", Timeout: "1m"}},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusSucceeded, out.Status)
+		require.Equal(t, []string{"launch:work", "close:work", "gatekeeper"}, timeline)
+		require.Len(t, gkEngine.calls, 1)
+		assert.Equal(t, "golang:1.27", gkEngine.calls[0].Sandbox.Image, "gatekeeper falls back to worker sandbox when qc.sandbox omitted")
+		snap, err := cp.LoadQCLedgerSnapshot(ctx)
+		require.NoError(t, err)
+		require.Empty(t, snap, "gatekeeper-only qc must not persist any QC ledger")
+	})
+
+	t.Run("per-node max_gatekeeper_reworks = 0 overrides request MaxGatekeeperReworks and budget is independent from max_qc_rounds", func(t *testing.T) {
+		blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+		require.NoError(t, err)
+		cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+		require.NoError(t, err)
+		fakeGit := newFakeGitAdapter(shaBase)
+
+		fail := &sandboxruntime.GatekeeperFailure{Name: "unit", Command: []string{"go", "test"}, ExitCode: 1, Stderr: "broken"}
+		gkEngine := &mockSandboxEngine{failures: []*sandboxruntime.GatekeeperFailure{fail}}
+		launcher := &scriptedSessionLauncher{
+			openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+				func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
+					return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+						return &scriptedSession{id: "w-zero", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+							invokeToolMustOK(t, cfg, session.ToolSofaCompleteWork, map[string]any{"summary": "done"})
+							return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+						}}, nil
+					}}
+				},
+			},
+		}
+		r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+			ControlPlane: cp, GitAdapter: fakeGit, BlobStore: blobStore,
+			SandboxEngine: gkEngine, SessionLauncher: launcher,
+		})
+		require.NoError(t, err)
+
+		out, err := r.Run(ctx, runner.NodeExecutionRequest{
+			RunID: "run-zero-gk", NodeAddr: "worker.impl", Epoch: 1,
+			RepoURL: "https://github.com/acme/repo.git", BasedSource: "main",
+			Sandboxes: testSandboxes(), Harnesses: testHarnesses(),
+			MaxGatekeeperReworks: 5,
+			Worker: workerspec.Config{
+				Sandbox: baseSandboxRef("work"), Harness: baseHarnessRef("copilot"),
+				Model: "gpt-5", SystemPrompt: cty.StringVal("sys"), Prompt: cty.StringVal("go"),
+				Fallbacks: []workerspec.FallbackConfig{{Name: "up", On: []string{"gatekeeper_exhausted"}, Target: "worker.spec"}},
+				QC: &workerspec.QCConfig{
+					Criteria:                cty.MapVal(map[string]cty.Value{"c": cty.StringVal("ok")}),
+					MaxQCRounds:             3,
+					MaxGatekeeperReworks:    0,
+					MaxGatekeeperReworksSet: true,
+					Gatekeepers:             []workerspec.GatekeeperConfig{{Name: "unit", Command: []string{"go", "test"}, WorkingDir: ".", Timeout: "1m"}},
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, runner.StatusFallbackTriggered, out.Status)
+		require.Equal(t, "gatekeeper_exhausted", out.FallbackReason)
+		require.Len(t, gkEngine.calls, 1)
+		require.Len(t, launcher.requests, 1, "only 1 work attempt, 0 reworks, 0 QC sessions")
 	})
 }

@@ -148,16 +148,6 @@ func TestWorkerRunnerWithExternalCopilotPluginPodmanIntegration(t *testing.T) {
 			Artifacts: map[string]workerspec.Artifact{
 				"report": {Name: "report", Type: "file", Path: "report.json", Description: "report", Required: true, NonEmpty: true},
 			},
-			Gatekeepers: []workerspec.GatekeeperConfig{
-				{
-					Name:             "verify_feature",
-					Command:          []string{"sh", "-c", "test \"$(cat allowed/feature.txt)\" = \"feature-v1\""},
-					WorkingDir:       ".",
-					Timeout:          "1m",
-					ExpectExitCode:   0,
-					RequireCleanTree: true,
-				},
-			},
 			QC: &workerspec.QCConfig{
 				Criteria: cty.MapVal(map[string]cty.Value{
 					"read_only_isolation": cty.StringVal("QC must not mutate workspace or artifacts"),
@@ -165,6 +155,16 @@ func TestWorkerRunnerWithExternalCopilotPluginPodmanIntegration(t *testing.T) {
 				}),
 				Model:       "qc-model",
 				MaxQCRounds: 2,
+				Gatekeepers: []workerspec.GatekeeperConfig{
+					{
+						Name:             "verify_feature",
+						Command:          []string{"sh", "-c", "test \"$(cat allowed/feature.txt)\" = \"feature-v1\""},
+						WorkingDir:       ".",
+						Timeout:          "1m",
+						ExpectExitCode:   0,
+						RequireCleanTree: true,
+					},
+				},
 			},
 		},
 	})

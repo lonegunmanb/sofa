@@ -65,19 +65,6 @@ func buildDeferredExpression(
 	}
 	builder.WriteString("}\n")
 
-	builder.WriteString("gatekeeper = {\n")
-	for _, gk := range nestedBlocksByType(block, "gatekeeper") {
-		name := labelOf(gk)
-		fmt.Fprintf(&builder, "%s = ", strconv.Quote(name))
-		writeDeferredObject(&builder, gk, map[string]string{
-			"working_dir":            strconv.Quote("."),
-			"timeout":                strconv.Quote("10m"),
-			"expect_exit_code":       "0",
-			"require_clean_worktree": "true",
-		}, nil)
-	}
-	builder.WriteString("}\n")
-
 	qcBlocks := nestedBlocksByType(block, "qc")
 	builder.WriteString("qc = ")
 	if len(qcBlocks) == 0 {
@@ -124,6 +111,12 @@ func writeDeferredQC(builder *strings.Builder, block *golden.HclBlock) {
 	if _, ok := block.Attributes()["max_qc_rounds"]; !ok {
 		fmt.Fprintf(builder, "max_qc_rounds = %d\n", DefaultMaxQCRounds)
 	}
+	if _, ok := block.Attributes()["max_gatekeeper_reworks"]; !ok {
+		fmt.Fprintf(builder, "max_gatekeeper_reworks = %d\n", DefaultMaxGatekeeperReworks)
+		builder.WriteString("max_gatekeeper_reworks_set = false\n")
+	} else {
+		builder.WriteString("max_gatekeeper_reworks_set = true\n")
+	}
 	writeExprAttributes(builder, block.Attributes(), nil, nil)
 	retryBlocks := nestedBlocksByType(block, "retry")
 	builder.WriteString("retry = ")
@@ -132,6 +125,18 @@ func writeDeferredQC(builder *strings.Builder, block *golden.HclBlock) {
 	} else {
 		writeDeferredObject(builder, retryBlocks[0], nil, nil)
 	}
+	builder.WriteString("gatekeeper = {\n")
+	for _, gk := range nestedBlocksByType(block, "gatekeeper") {
+		name := labelOf(gk)
+		fmt.Fprintf(builder, "%s = ", strconv.Quote(name))
+		writeDeferredObject(builder, gk, map[string]string{
+			"working_dir":            strconv.Quote("."),
+			"timeout":                strconv.Quote("10m"),
+			"expect_exit_code":       "0",
+			"require_clean_worktree": "true",
+		}, nil)
+	}
+	builder.WriteString("}\n")
 	builder.WriteString("}\n")
 }
 

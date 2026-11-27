@@ -1059,3 +1059,136 @@ output "east_tag" {
 	unmarkedSensTag, _ := sensModBound.Inputs["tag"].UnmarkDeep()
 	assert.Equal(t, "east-secret-az-sofa/run-1/prep", unmarkedSensTag.AsString())
 }
+
+func TestQCNestedGatekeeperPlanRoundTripAndDynamicApplyEval(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	archiveDir := t.TempDir()
+	extractDir := t.TempDir()
+
+	writeHCLFile(t, filepath.Join(rootDir, "main.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "golang:1.27"
+}
+
+sandbox "qc_env" {
+  runtime = "podman"
+  image   = "alpine:latest"
+}
+
+harness "copilot" {}
+
+go_tool "discover_checks" {
+  description = "Discover checks"
+  source = <<-GO
+    import "context"
+    type Input struct{}
+    type Output struct {
+      Checks map[string]string `+"`json:\"checks\"`"+`
+    }
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      return ToolResponse[Output]{Accepted: true}, nil
+    }
+  GO
+}
+
+worker "discover" {
+  based_source      = source.project.branch
+  sandbox           = sandbox.go_env
+  harness           = harness.copilot
+  model             = "gpt-5"
+  system_prompt     = "Discover checks"
+  terminate_tool_id = go_tool.discover_checks.id
+  qc {
+    sandbox                = sandbox.qc_env
+    max_gatekeeper_reworks = 0
+    gatekeeper "lint" {
+      command = ["go", "vet", "./..."]
+    }
+  }
+}
+
+dynamic_worker "verify" {
+  dynamic "worker" {
+    for_each = jsondecodewithtype(
+      worker.discover.result,
+      object({ checks = map(string) })
+    ).checks
+    iterator = check
+
+    content {
+      based_source  = worker.discover.work_branch
+      sandbox       = sandbox.go_env
+      harness       = harness.copilot
+      model         = "gpt-5"
+      system_prompt = "Verify ${check.key}"
+
+      qc {
+        sandbox                = sandbox.qc_env
+        max_gatekeeper_reworks = 4
+        gatekeeper "unit" {
+          command = ["go", "test", "-run", check.value]
+        }
+      }
+    }
+  }
+}
+`)
+
+	exported := compileTestPlan(t, rootDir)
+	archivePath := filepath.Join(archiveDir, "qc-gk.sofaplan")
+	require.NoError(t, plan.SaveArchive(archivePath, exported, plan.ArchiveSource{ConfigDir: rootDir}))
+	loaded, err := plan.LoadArchive(archivePath, extractDir, plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	planned := loaded.Plan
+	discoverResult := `{"checks":{"auth":"TestAuth"}}`
+	state := applyeval.RuntimeState{
+		Sources: map[string]applyeval.SourceRuntimeState{
+			"source.project": {CommitSHA: "1111111111111111111111111111111111111111"},
+		},
+		Workers: map[string]applyeval.WorkerRuntimeResult{
+			"worker.discover": {
+				WorkBranch: "sofa/run-1/worker.discover",
+				CommitSHA:  "2222222222222222222222222222222222222222",
+				Result:     &discoverResult,
+			},
+		},
+	}
+
+	ctx, err := applyeval.BuildEvalContext(planned, state, applyeval.WithBaseDir(extractDir))
+	require.NoError(t, err)
+
+	discoverCfg, err := applyeval.EvalReadyWorker(ctx, nodeByAddress(t, planned, "worker.discover"), applyeval.WithPlan(planned))
+	require.NoError(t, err)
+	require.NotNil(t, discoverCfg.QC)
+	assert.Equal(t, "sandbox.qc_env", discoverCfg.QC.Sandbox.GetAttr("address").AsString())
+	assert.Equal(t, 0, discoverCfg.QC.MaxGatekeeperReworks)
+	assert.True(t, discoverCfg.QC.MaxGatekeeperReworksSet)
+	assert.Equal(t, 0, discoverCfg.QC.Criteria.LengthInt())
+	require.Len(t, discoverCfg.QC.Gatekeepers, 1)
+	assert.Equal(t, "lint", discoverCfg.QC.Gatekeepers[0].Name)
+	assert.Equal(t, []string{"go", "vet", "./..."}, discoverCfg.QC.Gatekeepers[0].Command)
+
+	dynNode := nodeByAddress(t, planned, "dynamic_worker.verify")
+	keys, elems, err := applyeval.EvalDynamicWorkerCollection(ctx, dynNode)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"auth"}, keys)
+
+	authCfg, err := applyeval.ProjectDynamicInstance(ctx, dynNode, "auth", elems["auth"], applyeval.WithPlan(planned))
+	require.NoError(t, err)
+	require.NotNil(t, authCfg.QC)
+	assert.Equal(t, "sandbox.qc_env", authCfg.QC.Sandbox.GetAttr("address").AsString())
+	assert.Equal(t, 4, authCfg.QC.MaxGatekeeperReworks)
+	assert.True(t, authCfg.QC.MaxGatekeeperReworksSet)
+	require.Len(t, authCfg.QC.Gatekeepers, 1)
+	assert.Equal(t, "unit", authCfg.QC.Gatekeepers[0].Name)
+	assert.Equal(t, []string{"go", "test", "-run", "TestAuth"}, authCfg.QC.Gatekeepers[0].Command)
+}

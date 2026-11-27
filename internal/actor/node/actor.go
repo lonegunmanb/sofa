@@ -1951,7 +1951,6 @@ func isZeroWorkerConfig(w workerspec.Config) bool {
 		w.Prompt == cty.NilVal &&
 		len(w.WritablePaths) == 0 &&
 		len(w.Artifacts) == 0 &&
-		len(w.Gatekeepers) == 0 &&
 		len(w.Fallbacks) == 0 &&
 		w.QC == nil
 }

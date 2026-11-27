@@ -147,26 +147,28 @@ worker "implement" {
     non_empty   = true
   }
 
-  # 确定性守门员：在冻结后的容器内部执行命令，校验真实退出码与干净工作树
-  gatekeeper "unit_test" {
-    command                = ["go", "test", "./...", "-count=1"]
-    working_dir            = "."
-    timeout                = "10m"
-    expect_exit_code       = 0
-    require_clean_worktree = true
-  }
-
-  # 独立容器 QC Session（默认继承所属 worker 的 sandbox / harness / model_provider / model / profile，可独立覆盖任一维度）
+  # 独立容器 QC 阶段（包含确定性 gatekeeper 与可选 LLM QC Session；默认继承所属 worker 的 sandbox / harness / model_provider / model / profile，可独立覆盖任一维度）
+  # 至少声明 1 个 gatekeeper 或非空 criteria；省略 criteria 时仅运行 gatekeeper（不启动 LLM QC Session）
   qc {
-    sandbox          = null # 可选：覆盖为如 sandbox.sec_audit 换用专用审计镜像（仍只读挂载同一冻结 /workspace）
-    harness          = null # 可选：覆盖为如 harness.antigravity 做跨模型/跨 Harness 独立质检
-    model_provider   = null # 可选：显式写 null 可豁免继承父 worker 的 model_provider
-    model            = "claude-opus-4-6"
-    profile          = null
-    reasoning_effort = "high"
-    max_qc_rounds    = 3
+    sandbox                = null # 可选：覆盖为如 sandbox.sec_audit 换用专用审计镜像（gatekeeper 与只读 QC 均在此沙箱中运行）
+    harness                = null # 可选：覆盖为如 harness.antigravity 做跨模型/跨 Harness 独立质检
+    model_provider         = null # 可选：显式写 null 可豁免继承父 worker 的 model_provider
+    model                  = "claude-opus-4-6"
+    profile                = null
+    reasoning_effort       = "high"
+    max_qc_rounds          = 3
+    max_gatekeeper_reworks = 3 # 可选：整数 >= 0，默认 3（独立于 max_qc_rounds 计数）
 
-    criteria = {
+    # 确定性守门员：在 QC 沙箱内先于 LLM QC 执行命令，校验真实退出码与干净工作树（支持 dynamic "gatekeeper"）
+    gatekeeper "unit_test" {
+      command                = ["go", "test", "./...", "-count=1"]
+      working_dir            = "."
+      timeout                = "10m"
+      expect_exit_code       = 0
+      require_clean_worktree = true
+    }
+
+    criteria = { # 可选：省略或为 null 时仅执行 gatekeeper，不启动 LLM QC
       both_directions = "验证关闭通知不发送且开启通知仍正常发送。"
     }
   }
@@ -203,8 +205,10 @@ dynamic_worker "verify_notifications" {
       system_prompt = "完成单项邮件通知验证。"
       prompt        = "验证 ${check.key} 满足：${check.value}。"
 
-      gatekeeper "test" {
-        command = ["go", "test", "./..."]
+      qc {
+        gatekeeper "test" {
+          command = ["go", "test", "./..."]
+        }
       }
     }
   }

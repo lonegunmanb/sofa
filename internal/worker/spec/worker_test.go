@@ -308,9 +308,11 @@ func TestP02StrictScalarTypesNullabilityKnownnessAndWholeIntegers(t *testing.T) 
 		{
 			name: "gatekeeper expect_exit_code cannot be fractional",
 			hcl: fmt.Sprintf(`worker "w" { %s
-  gatekeeper "unit" {
-    command          = ["go", "test"]
-    expect_exit_code = 1.5
+  qc {
+    gatekeeper "unit" {
+      command          = ["go", "test"]
+      expect_exit_code = 1.5
+    }
   }
 }`, validWorkerAttrs()),
 		},
@@ -504,9 +506,11 @@ func TestP03ContractAttributesRetryQuotaAndNestedWhitelists(t *testing.T) {
 		{
 			name: "unexpected nested block in gatekeeper",
 			hcl: fmt.Sprintf(`worker "w" { %s
-  gatekeeper "unit" {
-    command = ["go", "test"]
-    extra {}
+  qc {
+    gatekeeper "unit" {
+      command = ["go", "test"]
+      extra {}
+    }
   }
 }`, validWorkerAttrs()),
 		},
@@ -814,11 +818,11 @@ func TestP11DeferredExpressionCompleteness(t *testing.T) {
     path        = "reports/r.md"
     description = "report"
   }
-  gatekeeper "unit" {
-    command = ["go", "test"]
-  }
   qc {
     criteria = { a = "b" }
+    gatekeeper "unit" {
+      command = ["go", "test"]
+    }
   }
   fallback "rework" {
     on        = ["qc_exhausted"]
@@ -836,8 +840,8 @@ func TestP11DeferredExpressionCompleteness(t *testing.T) {
 	require.Contains(t, expr, "artifact =")
 	require.Contains(t, expr, "import_artifact =")
 	require.Contains(t, expr, `"/.sofa/imports/spec"`)
-	require.Contains(t, expr, "gatekeeper =")
 	require.Contains(t, expr, "qc =")
+	require.Contains(t, expr, "gatekeeper =")
 	require.Contains(t, expr, "fallback =")
 	require.Contains(t, expr, `"worker.up"`)
 }
@@ -859,11 +863,13 @@ func TestP14LabelsAndUniqueNestedNames(t *testing.T) {
   }
 }`, validWorkerAttrs()),
 		fmt.Sprintf(`worker "w" { %s
-  gatekeeper "unit" {
-    command = ["go", "test"]
-  }
-  gatekeeper "unit" {
-    command = ["go", "vet"]
+  qc {
+    gatekeeper "unit" {
+      command = ["go", "test"]
+    }
+    gatekeeper "unit" {
+      command = ["go", "vet"]
+    }
   }
 }`, validWorkerAttrs()),
 		fmt.Sprintf(`worker "w" { %s
@@ -906,10 +912,6 @@ func TestWorkerConfigDeepCopyAndQCNullModelProvider(t *testing.T) {
     sources = []
   }
 
-  gatekeeper "unit" {
-    command = ["go", "test", "./..."]
-  }
-
   retry {
     lifecycle_retries   = 2
     error_message_regex = ["timeout"]
@@ -920,6 +922,9 @@ func TestWorkerConfigDeepCopyAndQCNullModelProvider(t *testing.T) {
     criteria       = { ok = "yes" }
     tool_ids       = ["tool_go_tool_qc_1"]
     tool_call_quota = { tool_go_tool_qc_1 = 1 }
+    gatekeeper "unit" {
+      command = ["go", "test", "./..."]
+    }
     retry {
       model_call_retries = 3
     }
@@ -956,7 +961,7 @@ func TestWorkerConfigDeepCopyAndQCNullModelProvider(t *testing.T) {
 	snapshot.Retry.ErrorMessageRegex[0] = "mutated"
 	snapshot.Artifacts["extra"] = Artifact{Name: "extra"}
 	snapshot.Imports["extra"] = ImportArtifact{Name: "extra"}
-	snapshot.Gatekeepers[0].Command[0] = "mutated"
+	snapshot.QC.Gatekeepers[0].Command[0] = "mutated"
 	snapshot.QC.ToolIDs[0] = "mutated"
 	snapshot.QC.ToolCallQuota["tool_go_tool_qc_1"] = 999
 	*snapshot.QC.Retry.ModelCallRetries = 999
@@ -979,7 +984,7 @@ func TestWorkerConfigDeepCopyAndQCNullModelProvider(t *testing.T) {
 	require.Equal(t, []string{"timeout"}, fresh.Retry.ErrorMessageRegex)
 	require.NotContains(t, fresh.Artifacts, "extra")
 	require.NotContains(t, fresh.Imports, "extra")
-	require.Equal(t, "go", fresh.Gatekeepers[0].Command[0])
+	require.Equal(t, "go", fresh.QC.Gatekeepers[0].Command[0])
 	require.Equal(t, []string{"tool_go_tool_qc_1"}, fresh.QC.ToolIDs)
 	require.Equal(t, 1, fresh.QC.ToolCallQuota["tool_go_tool_qc_1"])
 	require.Equal(t, 3, *fresh.QC.Retry.ModelCallRetries)
@@ -1000,10 +1005,12 @@ func TestDeferredDynamicGatekeeperEvaluatesWithoutIteratorVar(t *testing.T) {
   model         = "gpt-5"
   system_prompt = "sys"
 
-  dynamic "gatekeeper" {
-    for_each = toset(["test"])
-    content "unit" {
-      command = ["go", gatekeeper.value, "./..."]
+  qc {
+    dynamic "gatekeeper" {
+      for_each = toset(["test"])
+      content "unit" {
+        command = ["go", gatekeeper.value, "./..."]
+      }
     }
   }
 }`
@@ -1037,7 +1044,7 @@ func TestDeferredDynamicGatekeeperEvaluatesWithoutIteratorVar(t *testing.T) {
 	}
 	val, valDiags := parsed.Value(evalCtx)
 	require.False(t, valDiags.HasErrors(), valDiags.Error())
-	cmd := val.GetAttr("gatekeeper").GetAttr("unit").GetAttr("command").AsValueSlice()
+	cmd := val.GetAttr("qc").GetAttr("gatekeeper").GetAttr("unit").GetAttr("command").AsValueSlice()
 	require.Len(t, cmd, 3)
 	require.Equal(t, "test", cmd[1].AsString())
 }
@@ -1065,17 +1072,19 @@ func TestFallbackWithDynamicGatekeeperAndQuotedTarget(t *testing.T) {
 		}),
 	}
 
-	// (a) Worker containing dynamic "gatekeeper" AND fallback referencing worker.other.artifact.test_report MUST fail.
+	// (a) Worker containing qc dynamic "gatekeeper" AND fallback referencing worker.other.artifact.test_report MUST fail.
 	dynamicAndForeignArtifact := fmt.Sprintf(`worker "w" { %s
   artifact "test_report" {
     type        = "file"
     path        = "reports/test.json"
     description = "test summary"
   }
-  dynamic "gatekeeper" {
-    for_each = toset(["unit"])
-    content "unit" {
-      command = ["go", "test"]
+  qc {
+    dynamic "gatekeeper" {
+      for_each = toset(["unit"])
+      content "unit" {
+        command = ["go", "test"]
+      }
     }
   }
   fallback "rework" {
@@ -1190,6 +1199,126 @@ func TestContainerExternalArtifactAndImportPaths(t *testing.T) {
     description = "out"
   }
 }`, validWorkerAttrs(), badPath), nil)
+		require.Error(t, err)
+	}
+}
+
+func TestQCNestedGatekeeperAndMaxReworksValidation(t *testing.T) {
+	// 1. Worker-level gatekeeper and dynamic "gatekeeper" MUST fail with migration error pointing to qc.
+	for _, bad := range []string{
+		fmt.Sprintf(`worker "w" { %s
+  gatekeeper "unit" {
+    command = ["go", "test"]
+  }
+}`, validWorkerAttrs()),
+		fmt.Sprintf(`worker "w" { %s
+  dynamic "gatekeeper" {
+    for_each = toset(["unit"])
+    content "unit" {
+      command = ["go", "test"]
+    }
+  }
+}`, validWorkerAttrs()),
+	} {
+		_, err := decodeWorkerHCL(t, bad, nil)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "qc")
+	}
+
+	// 2. qc with gatekeepers only (no criteria) succeeds, with default max_gatekeeper_reworks = 3.
+	gkOnlyHCL := fmt.Sprintf(`worker "w" { %s
+  qc {
+    gatekeeper "unit" {
+      command = ["go", "test", "./..."]
+    }
+  }
+}`, validWorkerAttrs())
+	wGKOnly, err := decodeWorkerHCL(t, gkOnlyHCL, nil)
+	require.NoError(t, err)
+	qcOnly := wGKOnly.WorkerConfig().QC
+	require.NotNil(t, qcOnly)
+	require.Equal(t, 3, qcOnly.MaxGatekeeperReworks)
+	require.False(t, qcOnly.MaxGatekeeperReworksSet)
+	require.True(t, qcOnly.Criteria.IsNull() || qcOnly.Criteria.LengthInt() == 0)
+	require.Len(t, qcOnly.Gatekeepers, 1)
+	require.Equal(t, "unit", qcOnly.Gatekeepers[0].Name)
+
+	// 3. qc with explicit max_gatekeeper_reworks = 0 succeeds and marks MaxGatekeeperReworksSet = true.
+	zeroReworkHCL := fmt.Sprintf(`worker "w" { %s
+  qc {
+    max_gatekeeper_reworks = 0
+    gatekeeper "unit" {
+      command = ["go", "test"]
+    }
+  }
+}`, validWorkerAttrs())
+	wZero, err := decodeWorkerHCL(t, zeroReworkHCL, nil)
+	require.NoError(t, err)
+	require.Equal(t, 0, wZero.WorkerConfig().QC.MaxGatekeeperReworks)
+	require.True(t, wZero.WorkerConfig().QC.MaxGatekeeperReworksSet)
+
+	// 4. dynamic "gatekeeper" inside qc expands via golden.
+	dynGKHCL := fmt.Sprintf(`worker "w" { %s
+  qc {
+    dynamic "gatekeeper" {
+      for_each = toset(["unit", "vet"])
+      content "unit" {
+        command = ["go", gatekeeper.value, "./..."]
+      }
+    }
+  }
+}`, validWorkerAttrs())
+	// Duplicate label "unit" above should fail duplicate check; distinct labels via separate blocks or single element succeeds.
+	_, err = decodeWorkerHCL(t, dynGKHCL, nil)
+	require.Error(t, err)
+
+	dynSingleGKHCL := fmt.Sprintf(`worker "w" { %s
+  qc {
+    dynamic "gatekeeper" {
+      for_each = toset(["test"])
+      content "unit" {
+        command = ["go", gatekeeper.value, "./..."]
+      }
+    }
+  }
+}`, validWorkerAttrs())
+	wDyn, err := decodeWorkerHCL(t, dynSingleGKHCL, nil)
+	require.NoError(t, err)
+	require.Len(t, wDyn.WorkerConfig().QC.Gatekeepers, 1)
+	require.Equal(t, []string{"go", "test", "./..."}, wDyn.WorkerConfig().QC.Gatekeepers[0].Command)
+
+	// 5. Invalid qc configurations: neither gatekeeper nor criteria, negative max_gatekeeper_reworks, duplicate gatekeepers.
+	for _, bad := range []string{
+		fmt.Sprintf(`worker "w" { %s
+  qc {
+    max_qc_rounds = 2
+  }
+}`, validWorkerAttrs()),
+		fmt.Sprintf(`worker "w" { %s
+  qc {
+    criteria = null
+  }
+}`, validWorkerAttrs()),
+		fmt.Sprintf(`worker "w" { %s
+  qc {
+    max_gatekeeper_reworks = -1
+    criteria               = { ok = "yes" }
+  }
+}`, validWorkerAttrs()),
+		fmt.Sprintf(`worker "w" { %s
+  qc {
+    max_gatekeeper_reworks = 1.5
+    criteria               = { ok = "yes" }
+  }
+}`, validWorkerAttrs()),
+		fmt.Sprintf(`worker "w" { %s
+  qc {
+    gatekeeper "dup" { command = ["go", "test"] }
+    gatekeeper "dup" { command = ["go", "vet"] }
+  }
+}`, validWorkerAttrs()),
+	} {
+		_, err := decodeWorkerHCL(t, bad, nil)
 		require.Error(t, err)
 	}
 }

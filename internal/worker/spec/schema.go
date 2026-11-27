@@ -86,7 +86,6 @@ type Config struct {
 	ToolUses            []ToolUse
 	Artifacts           map[string]Artifact
 	Imports             map[string]ImportArtifact
-	Gatekeepers         []GatekeeperConfig
 	QC                  *QCConfig
 	Fallbacks           []FallbackConfig
 	DeferredExpression  string
@@ -117,12 +116,6 @@ func (c Config) Clone() Config {
 	}
 	cloned.Artifacts = maps.Clone(c.Artifacts)
 	cloned.Imports = maps.Clone(c.Imports)
-	if c.Gatekeepers != nil {
-		cloned.Gatekeepers = make([]GatekeeperConfig, len(c.Gatekeepers))
-		for i, g := range c.Gatekeepers {
-			cloned.Gatekeepers[i] = g.Clone()
-		}
-	}
 	if c.QC != nil {
 		qc := c.QC.Clone()
 		cloned.QC = &qc
@@ -176,7 +169,6 @@ var (
 	workerNestedBlockTypes = map[string]struct{}{
 		"artifact":        {},
 		"import_artifact": {},
-		"gatekeeper":      {},
 		"qc":              {},
 		"fallback":        {},
 		"tool_use":        {},
@@ -712,10 +704,15 @@ func (w *WorkerBlock) validateSchema(block *golden.HclBlock) error {
 	}
 	for _, nested := range block.NestedBlocks() {
 		switch nested.Type {
-		case "artifact", "import_artifact", "gatekeeper", "fallback", "tool_use":
+		case "artifact", "import_artifact", "fallback", "tool_use":
 			if len(nested.Labels) != 1 {
 				return fail("worker %s block must have exactly one name", nested.Type)
 			}
+		case "gatekeeper":
+			if len(nested.Labels) == 1 {
+				return fail("worker gatekeeper block is no longer supported at worker level; move gatekeeper %q into qc { gatekeeper %q { ... } }", nested.Labels[0], nested.Labels[0])
+			}
+			return fail("worker gatekeeper block is no longer supported at worker level; move it into qc { gatekeeper \"<name>\" { ... } }")
 		case "qc", "retry":
 			if len(nested.Labels) != 0 {
 				return fail("worker %s block does not accept labels", nested.Type)
@@ -723,6 +720,9 @@ func (w *WorkerBlock) validateSchema(block *golden.HclBlock) error {
 		case "dynamic":
 			if len(nested.Labels) != 1 {
 				return fail("worker dynamic block must declare a single target block label")
+			}
+			if nested.Labels[0] == "gatekeeper" {
+				return fail(`dynamic "gatekeeper" is no longer supported at worker level; move it into qc { dynamic "gatekeeper" { ... } }`)
 			}
 			if _, ok := workerNestedBlockTypes[nested.Labels[0]]; !ok {
 				return fail("unsupported dynamic block type %q in worker block", nested.Labels[0])
@@ -993,7 +993,6 @@ func (w *WorkerBlock) decodeCore(block *golden.HclBlock, ctx *hcl.EvalContext, d
 }
 
 func (w *WorkerBlock) decodeNestedExecution(block *golden.HclBlock, ctx *hcl.EvalContext, deferred *bool) error {
-	gatekeeperNames := map[string]struct{}{}
 	fallbackNames := map[string]struct{}{}
 	triggerTargets := map[string]string{}
 	toolUseNames := map[string]struct{}{}
@@ -1012,21 +1011,11 @@ func (w *WorkerBlock) decodeNestedExecution(block *golden.HclBlock, ctx *hcl.Eva
 				return err
 			}
 			w.planned.Retry = override
-		case "gatekeeper":
-			gatekeeper, err := DecodeGatekeeper(nested, ctx)
-			if err != nil {
-				return err
-			}
-			if _, exists := gatekeeperNames[gatekeeper.Name]; exists {
-				return fail("worker %q gatekeeper %q is declared more than once", w.Name(), gatekeeper.Name)
-			}
-			gatekeeperNames[gatekeeper.Name] = struct{}{}
-			w.planned.Gatekeepers = append(w.planned.Gatekeepers, gatekeeper)
 		case "qc":
 			if w.planned.QC != nil {
 				return fail("worker %q supports at most one qc block", w.Name())
 			}
-			qc, err := decodeQC(nested, ctx)
+			qc, err := decodeQC(nested, ctx, deferred)
 			if err != nil {
 				return err
 			}

@@ -3,8 +3,8 @@
 This template runs a heterogeneous self-hosting pipeline on **sofa**:
 
 1. **Implementation (`worker.implement_slice`)**: `harness.copilot` inside `sandbox.go_dev` (`golang:1.27`), restricted to `var.writable_paths` and required to produce `summary.md`.
-2. **Deterministic Gatekeeper (`gatekeeper.go_quality`)**: Runs `gofmt -l .`, `go vet ./...`, and `go test ./... -count=1` inside the frozen container with `require_clean_worktree = true`.
-3. **Independent Read-Only QC (`qc`)**: `harness.antigravity` inside a separate read-only `sandbox.qc_audit` container (`model_provider = null`) auditing the frozen workspace and `summary.md`.
+2. **Deterministic Gatekeeper (`qc.gatekeeper.go_quality`)**: Runs `gofmt -l .`, `go vet ./...`, and `go test ./... -count=1` inside `sandbox.qc_audit` with `require_clean_worktree = true` before the LLM audit.
+3. **Independent Read-Only QC (`qc`)**: `harness.antigravity` inside the separate read-only `sandbox.qc_audit` container (`model_provider = null`) auditing the frozen workspace and `summary.md`.
 4. **Human Approval (`human_approval = "required"`)**: Pauses for explicit sign-off via the Vue 3 dashboard or CLI before completing.
 
 ---

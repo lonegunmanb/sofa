@@ -437,9 +437,11 @@ worker "specify" {
   based_source  = "main"
   model         = "test-model"
   system_prompt = "specify"
-  gatekeeper "test" {
-    command     = ["go", "test", "./..."]
-    working_dir = "../outside"
+  qc {
+    gatekeeper "test" {
+      command     = ["go", "test", "./..."]
+      working_dir = "../outside"
+    }
   }
 }
 `)
@@ -975,13 +977,6 @@ worker "implement" {
     description = "test summary"
   }
 
-  dynamic "gatekeeper" {
-    for_each = toset(["unit"])
-    content "unit" {
-      command = ["go", "test", "./..."]
-    }
-  }
-
   retry {
     lifecycle_retries  = 3
     model_call_retries = 2
@@ -993,6 +988,13 @@ worker "implement" {
     model_provider = model_provider.openai
     model          = "gpt-5"
     criteria       = { tests = "all tests pass" }
+
+    dynamic "gatekeeper" {
+      for_each = toset(["unit"])
+      content "unit" {
+        command = ["go", "test", "./..."]
+      }
+    }
   }
 
   fallback "rework_tasks" {
@@ -1023,9 +1025,9 @@ output "final_result" {
 	require.NotNil(t, impl)
 	wc := impl.WorkerConfig()
 	require.Equal(t, "https://github.com/example/sofa.git", wc.SourceURL)
-	require.Len(t, wc.Gatekeepers, 1)
-	require.Equal(t, "unit", wc.Gatekeepers[0].Name)
 	require.NotNil(t, wc.QC)
+	require.Len(t, wc.QC.Gatekeepers, 1)
+	require.Equal(t, "unit", wc.QC.Gatekeepers[0].Name)
 	require.True(t, wc.QC.ModelProviderSet)
 	require.Len(t, wc.Fallbacks, 1)
 	require.Equal(t, []string{"test_report"}, wc.Fallbacks[0].Artifacts)

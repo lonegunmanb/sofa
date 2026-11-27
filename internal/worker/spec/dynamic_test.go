@@ -111,8 +111,10 @@ dynamic_worker "verify_notifications" {
       system_prompt = "Verify notification."
       prompt        = "Check ${check.key}: ${check.value}"
 
-      gatekeeper "test" {
-        command = ["go", "test", "./..."]
+      qc {
+        gatekeeper "test" {
+          command = ["go", "test", "./..."]
+        }
       }
     }
   }
@@ -132,7 +134,8 @@ dynamic_worker "verify_notifications" {
 	require.NotEmpty(t, cfg.ContentTemplate)
 	_, diags := hclsyntax.ParseExpression([]byte(cfg.ContentTemplate), "template.hcl", hcl.InitialPos)
 	require.False(t, diags.HasErrors(), diags.Error())
-	require.Len(t, cfg.Content.Gatekeepers, 1)
+	require.NotNil(t, cfg.Content.QC)
+	require.Len(t, cfg.Content.QC.Gatekeepers, 1)
 
 	defaultIterHCL := `
 dynamic_worker "verify_default" {
@@ -670,4 +673,63 @@ dynamic_worker "audit" {
 `
 	_, err = decodeDynamicWorkerHCL(t, invalidHCL, nil)
 	require.Error(t, err)
+}
+
+func TestDynamicWorkerQCNestedGatekeeperApplyTime(t *testing.T) {
+	validHCL := `
+dynamic_worker "verify" {
+  dynamic "worker" {
+    for_each = jsondecodewithtype(
+      worker.discover.result,
+      object({ checks = map(string) })
+    ).checks
+    iterator = check
+
+    content {
+      based_source  = worker.discover.work_branch
+      sandbox       = sandbox.go_env
+      harness       = harness.local
+      model         = "gpt-5"
+      system_prompt = "Verify ${check.key}"
+
+      qc {
+        max_gatekeeper_reworks = 2
+        gatekeeper "test" {
+          command = ["go", "test", "-run", check.value]
+        }
+      }
+    }
+  }
+}
+`
+	d, err := decodeDynamicWorkerHCL(t, validHCL, baseDiscoverVars())
+	require.NoError(t, err)
+	cfg := d.DynamicWorkerConfig()
+	require.NotNil(t, cfg.Content.QC)
+	require.Equal(t, 2, cfg.Content.QC.MaxGatekeeperReworks)
+	require.True(t, cfg.Content.QC.MaxGatekeeperReworksSet)
+	require.Contains(t, cfg.ContentTemplate, "gatekeeper =")
+	require.Contains(t, cfg.ContentTemplate, "check.value")
+
+	// Worker-level gatekeeper inside dynamic_worker content MUST fail with migration error pointing to qc.
+	invalidHCL := `
+dynamic_worker "verify" {
+  dynamic "worker" {
+    for_each = toset(["a"])
+    content {
+      based_source  = "main"
+      sandbox       = sandbox.go_env
+      harness       = harness.local
+      model         = "gpt-5"
+      system_prompt = "Verify"
+      gatekeeper "test" {
+        command = ["go", "test"]
+      }
+    }
+  }
+}
+`
+	_, err = decodeDynamicWorkerHCL(t, invalidHCL, nil)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "qc")
 }

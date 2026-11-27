@@ -128,6 +128,13 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 	if err != nil {
 		return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
 	}
+	qcSandbox := workSandbox
+	if req.Worker.QC != nil && extractBlockAddress(req.Worker.QC.Sandbox) != "" {
+		qcSandbox, err = lookupSandbox(req.Sandboxes, req.Worker.QC.Sandbox, "qc sandbox")
+		if err != nil {
+			return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
+		}
+	}
 	workHarness, err := lookupHarness(req.Harnesses, req.Worker.Harness, "worker harness")
 	if err != nil {
 		return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
@@ -191,12 +198,17 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 	var qcLedger *session.QCLedger
 	var qcCriteria map[string]string
 	if req.Worker.QC != nil {
-		qcCriteria, err = extractQCCriteria(req.Worker.QC.Criteria)
-		if err != nil {
-			return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
-		}
-		qcLedger, err = session.NewQCLedger(qcCriteria)
-		if err != nil {
+		if hasNonEmptyQCCriteria(req.Worker.QC.Criteria) {
+			qcCriteria, err = extractQCCriteria(req.Worker.QC.Criteria)
+			if err != nil {
+				return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
+			}
+			qcLedger, err = session.NewQCLedger(qcCriteria)
+			if err != nil {
+				return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
+			}
+		} else if len(req.Worker.QC.Gatekeepers) == 0 {
+			err := errors.New("worker runner: qc requires at least one gatekeeper or non-empty criteria")
 			return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
 		}
 	}
@@ -299,9 +311,16 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 		return NodeOutcome{Status: StatusFailed, FailureReason: err.Error()}, err
 	}
 
-	maxGKReworks := req.MaxGatekeeperReworks
-	if maxGKReworks <= 0 {
-		maxGKReworks = DefaultMaxGatekeeperReworks
+	maxGKReworks := DefaultMaxGatekeeperReworks
+	if req.MaxGatekeeperReworks > 0 {
+		maxGKReworks = req.MaxGatekeeperReworks
+	}
+	if req.Worker.QC != nil {
+		if req.Worker.QC.MaxGatekeeperReworksSet {
+			maxGKReworks = req.Worker.QC.MaxGatekeeperReworks
+		} else if req.MaxGatekeeperReworks <= 0 && req.Worker.QC.MaxGatekeeperReworks > 0 {
+			maxGKReworks = req.Worker.QC.MaxGatekeeperReworks
+		}
 	}
 	maxArtReworks := req.MaxArtifactReworks
 	if maxArtReworks <= 0 {
@@ -487,16 +506,16 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 			}
 		}
 
-		// Step 2c: Deterministic gatekeeper containers.
-		if len(req.Worker.Gatekeepers) > 0 {
+		// Step 2c: Deterministic gatekeeper containers inside QC phase (using qcSandbox).
+		if req.Worker.QC != nil && len(req.Worker.QC.Gatekeepers) > 0 {
 			gkFail, gkErr := r.sandboxEngine().RunGatekeepers(ctx, sandboxruntime.GatekeeperRunSpec{
-				Sandbox:          workSandbox,
+				Sandbox:          qcSandbox,
 				HostWorkspaceDir: workspaceDir,
 				BundleDir:        req.BundleDir,
 				ImportsDir:       importsDir,
 				ArtifactsDir:     artifactsDir,
 				HostOS:           hostOS,
-			}, req.Worker.Gatekeepers)
+			}, req.Worker.QC.Gatekeepers)
 			if gkErr != nil {
 				return NodeOutcome{Status: StatusFailed, FailureReason: gkErr.Error()}, gkErr
 			}
@@ -526,8 +545,8 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 			}
 		}
 
-		// Step 2d: Independent read-only container QC session.
-		if req.Worker.QC != nil {
+		// Step 2d: Independent read-only container QC session (only when criteria present).
+		if req.Worker.QC != nil && len(qcCriteria) > 0 {
 			qcRound++
 			qcRes, qcErr := r.runQCRound(ctx, req, qcRoundParams{
 				Round:           qcRound,
@@ -536,7 +555,7 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 				Platform:        platform,
 				HostOS:          hostOS,
 				LookupEnv:       lookupEnv,
-				WorkSandbox:     workSandbox,
+				QCSandbox:       qcSandbox,
 				WorkHarness:     workHarness,
 				HasWorkProvider: hasWorkProvider,
 				WorkProvider:    workProvider,
@@ -804,7 +823,7 @@ type qcRoundParams struct {
 	Platform        harnessinstaller.Platform
 	HostOS          string
 	LookupEnv       func(string) (string, bool)
-	WorkSandbox     sandboxspec.SandboxConfig
+	QCSandbox       sandboxspec.SandboxConfig
 	WorkHarness     harnessspec.HarnessConfig
 	HasWorkProvider bool
 	WorkProvider    provider.Config
@@ -819,14 +838,7 @@ type qcRoundParams struct {
 func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest, p qcRoundParams) (session.QCResult, error) {
 	qc := req.Worker.QC
 
-	qcSandbox := p.WorkSandbox
-	if extractBlockAddress(qc.Sandbox) != "" {
-		var err error
-		qcSandbox, err = lookupSandbox(req.Sandboxes, qc.Sandbox, "qc sandbox")
-		if err != nil {
-			return session.QCResult{}, err
-		}
-	}
+	qcSandbox := p.QCSandbox
 	qcHarness := p.WorkHarness
 	if extractBlockAddress(qc.Harness) != "" {
 		var err error
@@ -1225,6 +1237,23 @@ func computeRetryPolicy(hasProvider bool, prov provider.Config, workerOverride p
 		}
 	}
 	return policy, nil
+}
+
+func hasNonEmptyQCCriteria(val cty.Value) bool {
+	if val == cty.NilVal {
+		return false
+	}
+	unmarked, _ := val.UnmarkDeep()
+	if unmarked.IsNull() {
+		return false
+	}
+	if !unmarked.IsWhollyKnown() {
+		return true
+	}
+	if !unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType() {
+		return true
+	}
+	return unmarked.LengthInt() > 0
 }
 
 func extractQCCriteria(val cty.Value) (map[string]string, error) {

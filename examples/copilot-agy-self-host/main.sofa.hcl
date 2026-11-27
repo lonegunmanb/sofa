@@ -53,20 +53,20 @@ worker "implement_slice" {
     non_empty   = true
   }
 
-  gatekeeper "go_quality" {
-    command                = ["sh", "-c", "unformatted=$(gofmt -l .); if [ -n \"$unformatted\" ]; then echo \"unformatted files:\"; echo \"$unformatted\"; exit 1; fi && go vet ./... && go test ./... -count=1"]
-    working_dir            = "."
-    timeout                = "10m"
-    expect_exit_code       = 0
-    require_clean_worktree = true
-  }
-
   qc {
     sandbox        = sandbox.qc_audit
     harness        = harness.antigravity
     model_provider = null
     model          = var.qc_model
     max_qc_rounds  = 3
+
+    gatekeeper "go_quality" {
+      command                = ["sh", "-c", "unformatted=$(gofmt -l .); if [ -n \"$unformatted\" ]; then echo \"unformatted files:\"; echo \"$unformatted\"; exit 1; fi && go vet ./... && go test ./... -count=1"]
+      working_dir            = "."
+      timeout                = "10m"
+      expect_exit_code       = 0
+      require_clean_worktree = true
+    }
 
     criteria = {
       spec_and_contracts = "Verify every implementation change matches AGENTS.md, the feature spec, and frozen contracts line by line."
