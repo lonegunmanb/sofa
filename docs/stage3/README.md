@@ -1,58 +1,77 @@
-# 阶段三（Stage 3）概要规划：分布式对象存储、Dapr Actor 控制面、统一 API 与安全看板
+# 阶段三（Stage 3）开发总纲：Dapr Actor 控制面、三层凭据管理、统一 API、安全看板与自举模板
 
-> **当前状态**：**概要规划（Outline）**——待阶段二（[docs/stage2/README.md](../stage2/README.md)，`010`–`020`）全部收口后，再按同样颗粒度拆写逐片保姆级实施蓝图。
-> 架构基线遵循 [architecture-contract.md](../architecture-contract.md) 与 [constitution.md](../../.specify/memory/constitution.md)。
-
----
-
-## 1. 阶段三目标与 `/grill-me` 对齐交付边界
-
-在阶段一（离线 `.sofaplan` 编译，`001`–`009`）与阶段二（宿主机单节点容器/双语言 Harness/Git/二阶段检查点执行底座，`010`–`020`）全部就绪的基础上，阶段三完成**分布式共享存储、Dapr Actor 编排面、对外统一管理协议与人机协作看板**：
-
-1. **分布式 `BlobStore` 扩展（S3 / MinIO / OSS 兼容实现）**：
-   - 在阶段二 `internal/blob.Store` 流式接口之上落地基于 `aws-sdk-go-v2/service/s3` 的 `S3Store`（支持自定义 Endpoint、Path-Style、分片上传、SHA-256 完整性校验与 `DeletePrefix` 批量清理），使多机 `sofa-worker` 无缝共享 `.sofaplan`、跨机 `Artifact` 与检查点快照。
-2. **纯正 `dapr/go-sdk/actor` 分布式控制面（单机/分布式 100% 同构）**：
-   - 落地五大 Actor（`OperatorActor`、`RunActor`、`NodeActor`、`MergeActor`、`ProcessRegistryActor`）及宿主机 `sofa-worker-<process_id>` Dapr Service Invocation 宿主；将阶段二的 `NodeStateStore` 与分支账本直接对接到真实 Actor；
-   - 单机模式自动生成指向本地状态目录的 Dapr 组件配置并启停托管本地 `daprd`；分布式模式直接连接共享 Dapr State Store / PubSub / Placement（不强制依赖 Kubernetes）。
-3. **非阻塞全图 DAG 推进、动态展开、返工循环与串行合并**：
-   - `RunActor` 通过毫秒级事件短调用 + Reminder 对账推进拓扑：注入已完成上游值求值延迟表达式、首次持久化固化 `dynamic_worker` 展开键并派生子 `NodeActor`、执行子模块延迟 `variable` `validation`、驱动嵌套 `module` 子图、处理显式 `fallback` 祖先返工（级联递增受影响节点 `epoch`）以及 `planned` / `immediate` 暂停；
-   - `MergeActor` 按 `sha256(repo_url + target_branch)` 维护持久化合并队列，调用阶段二 `018` 的 `ExecuteMergeCandidate` 串行集成，冲突或 `gatekeeper` 失败时按**“严格源头负责制”**将原 `worker` 下一轮基线升级为最新集成分支 `M_k` 并附带失败报告退回重跑。
-4. **统一 REST JSON + WebSocket 管理 API、全生命周期 CLI 与 Vue 3 安全看板**：
-   - 暴露 `/api/v1/runs`、`/nodes`、`/decisions`、`/artifacts` 与基于 Dapr PubSub 的 `/api/v1/ws` 实时流；
-   - 扩展 `cmd/sofa` 交付 `sofa apply <.sofaplan>`、`sofa runs`、`sofa pause/resume/rerun/delete`、`sofa decisions`；
-   - 构建 `web/`（Vue 3 + TypeScript + Vite，Vitest TDD）：提供 DAG 状态视图、节点轮次/日记/日志/检查点追踪、人工插话、决策卡片审批，以及强制不带 `allow-same-origin` 的 `<iframe sandbox="allow-scripts">` + CSP 隔离材料预览。
-5. **开箱即用 `examples/` 模式库与 `copilot + antigravity` 自举模板**：
-   - 新增顶层 `examples/` 目录收录核心工程编排模式（含 **`copilot` 作为编码 Worker + 确定性 `gatekeeper` + 独立只读容器 `antigravity` 作为异构 QC 审查员** 的自举切片开发模板、上游设计 `fallback` 返工模板、`dynamic_worker` 扇出 + `merge` 串行合入模板），并通过自动化单测对全部示例执行 `sofa plan` 编译校验防止示例腐烂。
+> **面向后续开发 Agent 的强制阅读说明**：
+> 阶段三包含 **按序递进的 12 个单职责微切片（`021`–`032`）**，所有关键设计分支均已通过 `/grill-me` 冻结。在为任一切片执行 `/speckit-specify`、`/speckit-plan`、`/speckit-tasks` 或 `/speckit-implement` 之前，**必须完整阅读本总纲及对应编号的分片蓝图**，严格按文档给定的包路径、结构体/接口签名、安全不变量与必测 Red → Green 用例落地，**严禁自行发明替代架构或合并多个分片**。
 
 ---
 
-## 2. 阶段三拟议微切片概要（`021`–`028`）
+## 1. `/grill-me` 冻结的 8 条核心架构契约
 
-| 切片编号 | 切片主题 | 核心职责概要 | 前置依赖 |
-| :--- | :--- | :--- | :--- |
-| **021** | **S3 / MinIO 兼容对象存储实现（`internal/blob/s3`）** | 基于 `aws-sdk-go-v2` 实现 `blob.Store`（流式分片上传、SHA-256 核验、重试与前缀清理），配合本地 MinIO / S3 兼容容器完成 Tier 2 集成测试 | Stage 2 (`011`) |
-| **022** | **`ProcessRegistryActor` 三态存活探测与 `sofa-worker` 守护进程** | 工作进程启动生成 `process_id` 注册 Dapr App ID、定期心跳、`HEALTHY → SUSPECT → DEAD` Reminder 主动探测、失联换机隔离与残留容器自清理 | Stage 2 (`018`–`020`) |
-| **023** | **`NodeActor` 权威状态机、日记插话队列与 `human_approval` 版本绑定** | 实现生产级 `NodeStateStore`：单调递增 `epoch` 栅栏、结构化日记流、人工插话（含 `wait_for_confirmation`）入队消费、决策卡片状态流转与 `(commit_sha, artifact_ids)` 精确绑定校验 | 022 |
-| **024** | **`MergeActor` 持久队列、串行集成与源头打回协议** | 按目标分支全局串行持久入队（忙时不丢弃不阻塞）、调度宿主机执行 `ExecuteMergeCandidate`、冲突/失败升级基线打回源头 `worker`、合入成功后禁止回滚 | 022, 023 |
-| **025** | **`RunActor`、`OperatorActor` 与单机 `daprd` 同构引导** | 全量 Run 索引与冷启动恢复；毫秒级非阻塞拓扑推进、延迟表达式求值、`dynamic_worker` 展开固化、嵌套 `module`、`fallback` 级联 `epoch` 重跑、`planned`/`immediate` 暂停、Run 结束/删除时按账本清理中间 Git 分支与 `BlobStore` 临时对象；单机 `daprd` 启停托管 | 021, 023, 024 |
-| **026** | **统一 REST + WebSocket API 服务与 `sofa apply` / 运维 CLI** | `/api/v1/*` 幂等 REST 端点、Dapr PubSub 驱动的 `/api/v1/ws` 实时流，以及 `sofa apply`、`sofa runs`、`sofa pause/resume/rerun/delete`、`sofa decisions` CLI 命令 | 025 |
-| **027** | **Vue 3 安全看板与人工决策工作台（`web/`）** | Vite + Vue 3 + TypeScript 前端工程（Vitest + Vue Test Utils TDD），实现 DAG 可视化、节点日记/检查点/日志追踪、人工插话、决策卡片审批与无 `allow-same-origin` 沙箱 `iframe` 材料预览 | 026 |
-| **028** | **`examples/` 经典编排模式库与 `copilot + antigravity` 自举模板** | 提供自举开发模板（`copilot` 编码 Worker + `gofmt`/`go vet`/`go test` `gatekeeper` + 独立只读容器 `antigravity` QC 互审）、`fallback` 返工模板、`dynamic_worker` + `merge` 模板，并附带 `sofa plan` 自动化校验测试 | 026 |
+1. **单一 `sofa` 二进制与三种运行角色（`cmd/sofa`）**：
+   - `sofa server --dev`：单机全栈合体模式（自动托管本地 Dapr `scheduler --etcd-embed --placement-enabled` + `daprd` + `state.sqlite` + `blob.LocalStore` + 控制面 Actors + REST/WebSocket API + 内嵌看板 + 本地内置 Worker，状态持久化于 `--state-dir`，宿主机重启后由持久化 Reminder 与 `OperatorActor` 自动换 `epoch` 断点续跑）；
+   - `sofa server`：纯控制面服务（连接外部配置的 Dapr 与 `BlobStore`，零本地容器执行）；
+   - `sofa worker`：独立宿主机算力节点（注册 Dapr App ID `sofa-worker-<process_id>`）。
+2. **Dapr 双端口物理隔离与原生透明落盘加密**：
+   - **严禁将 Dapr Actor/PubSub 回调路由暴露在对外公共 API 端口上**：进程内部单独绑定 `127.0.0.1:<dapr-app-port>`（强制随机 `APP_API_TOKEN` 仅对本地 `daprd` 开放）承载 `dapr/go-sdk` 服务回调；公共监听端口（默认 `127.0.0.1:8080`）仅暴露 `/api/v1/*`、`/healthz` 与内嵌看板静态资源。
+   - 落盘加密直接采用 Dapr State Store 原生 **`primaryEncryptionKey` / `secondaryEncryptionKey`** 客户端 AES-GCM 透明加密（`--dev` 下自动生成 `0600` 本地密钥文件与 `secretstores.local.file` 绑定，`sofa` 业务层零手写加解密代码）。
+3. **三层受管 `Env` / `Secret` 与第 0 秒 Preflight 预检**：
+   - 作用域覆盖链：**`Run` 单次层 > `Namespace` 项目命名空间层（默认 `"default"`，免预建实体） > `Global` 全局层**；
+   - 同一层内键名互斥（不可同时为 `Env` 与 `Secret`），`Secret` 严格 **Write-Only**（任何读取/列表 API 仅返回键名与更新时间，绝不回传明文）；
+   - 运行期严格只从受管库解析 `*_ref` / `env_refs`（不隐式回退读取 Worker `os.Environ()`，CLI 提供 `sofa secret set --from-env` 快捷导入）；`sofa apply` 提交瞬间核对三层合并视图，缺失任意引用变量立即在第 0 秒报错拦截。
+4. **轻量 Bearer Token 与防跨站鉴权**：
+   - `sofa server --dev` 默认监听 `127.0.0.1` 免输 Token（同时对写接口与 `/api/v1/ws` 实施严格同源 `Origin` 校验，阻断浏览器恶意页面或 `null` 源沙箱 `iframe` 跨站调用）；
+   - 正式 `sofa server` 或监听非回环地址时强制要求配置 `SOFA_API_TOKEN`（看板存入 `sessionStorage`）。
+5. **`sofa apply` 双输入与 `Ctrl+C` 即时中断语义**：
+   - 同时支持 `sofa apply <file.sofaplan>` 与 `sofa apply [dir]`（客户端本地即时编译 `.sofaplan` 后上传，服务端永不编译 HCL）；
+   - 默认前台订阅 WebSocket 实时打印进度与日志，**按 `Ctrl+C` 默认立即向服务端发送 `POST /api/v1/runs/{run_id}/pause?mode=immediate` 中断在途容器**；后台提交显式使用 `-d / --detach`。
+6. **Worker 槽位调度防雪崩**：
+   - `ProcessRegistryActor` 按空闲槽位最少负载分配任务；`--max-concurrency` 在独立 `sofa worker` 默认 **`10`**，在 `sofa server --dev` 默认 **`2`**（全部满载时就绪节点在 `RunActor` 排队，同时遵守 `module.parallelism`）。
+7. **延迟统一清理生命周期**：
+   - `sofa/ckpt/*` 检查点分支、`sofa/work/*` 工作分支及 `BlobStore` 产物/日志 JSONL 在 `SUCCEEDED` / `FAILED` / `PAUSED` 时一律保留（保障随时查阅、`sofa resume` 与单节点 `rerun`），仅在显式执行 **`DELETE /api/v1/runs/{run_id}`（`sofa delete <run_id>`）** 时统一清理（保留 `source` 与 `preserve` 分支）。
+8. **看板单二进制内嵌与自举模板先行**：
+   - Vue 3 看板通过 `go:embed` 单二进制同端口内嵌（提供未执行前端构建时的优雅占位 fallback，不阻塞 `go test ./...`），Agent HTML 预览强制 `<iframe sandbox="allow-scripts">`（无 `allow-same-origin`）+ 严格 CSP；
+   - `examples/` 首期交付 **`examples/copilot-agy-self-host/`** 自举模板与本地 Linux 双插件一键安装脚本。
 
 ---
 
-## 3. 阶段三源码目录扩展预览
+## 2. 阶段三源码目录布局
 
 ```text
 sofa/
-├── cmd/
-│   ├── sofa/                               # [026] 扩展 apply / runs / pause / resume / rerun / delete / decisions
-│   └── sofa-worker/                        # [022] 宿主机工作进程守护入口（Dapr App + Actor Host）
-├── examples/                               # [028] 经典模式库（含 copilot Worker + antigravity 只读 QC 自举模板）
+├── cmd/sofa/                                       # [030] 统一 CLI 入口 (init/plan/apply/server/worker/runs/decisions/env/secret)
+├── examples/copilot-agy-self-host/                 # [032] Copilot Worker + Gatekeeper + 只读 Antigravity QC 自举模板
+├── scripts/install-local-plugins.go                # [032] 一键交叉构建安装本地 Linux 双插件至 .sofa/plugins
 ├── internal/
-│   ├── blob/s3/                            # [021] S3 / MinIO / OSS 兼容 BlobStore 实现
-│   ├── actor/                              # [022-025] OperatorActor / RunActor / NodeActor / MergeActor / ProcessRegistryActor
-│   ├── daprhost/                           # [025] 单机模式本地 daprd 组件配置生成与生命周期托管
-│   └── server/                             # [026] REST JSON + WebSocket 统一管理 API 与 CSP 预览头
-└── web/                                    # [027] Vue 3 + TypeScript + Vite 看板与沙箱化决策工作台
+│   ├── blob/s3/                                    # [021] S3 / MinIO / OSS 兼容流式 BlobStore
+│   ├── daprhost/                                   # [022] 本地 scheduler + daprd 透明加密配置生成与进程托管
+│   ├── applyeval/                                  # [027] Apply 期延迟表达式求值、dynamic_worker 展开与 module 校验纯核心
+│   ├── actor/
+│   │   ├── config/                                 # [023] ConfigActor 三层 Env/Secret 管理与 .sofaplan 预检解析
+│   │   ├── registry/                               # [024] ProcessRegistryActor 三态探测与并发槽位调度
+│   │   ├── node/                                   # [025] NodeActor 权威状态机、插话/决策与 NodeControlPlane 桥接
+│   │   ├── merge/                                  # [026] MergeActor 持久合并队列与源头打回协议
+│   │   └── run/                                    # [028] OperatorActor + RunActor 全图推进、返工级联与延迟清理
+│   ├── worker/daemon/                              # [024] sofa-worker-<process_id> Dapr 服务宿主与 JSONL 日志归档
+│   ├── server/                                     # [029] 双端口隔离、REST + WebSocket API、鉴权与 CSP 预览网关
+│   └── webui/                                      # [031] Vue 3 构建产物 go:embed 包装与开发期空置 fallback
+└── web/                                            # [031] Vue 3 + TypeScript + Vite 安全看板与人工决策工作台
 ```
+
+---
+
+## 3. 阶段三微切片索引（`021`–`032`）
+
+| 编号 | 设计文档 | 核心交付物（单篇 ~250–450 行核心代码） | 前置依赖 |
+| :--- | :--- | :--- | :--- |
+| **021** | [021-s3-blobstore.md](./021-s3-blobstore.md) | `internal/blob/s3`：基于 `aws-sdk-go-v2` 的流式分片上传、SHA-256 核验与批量前缀删除 | Stage 2 (`011`) |
+| **022** | [022-local-dapr-host.md](./022-local-dapr-host.md) | `internal/daprhost`：`scheduler` + `daprd` 托管、`state.sqlite` `primaryEncryptionKey` 透明加密组件生成与集成测试基座 | Stage 2 |
+| **023** | [023-config-actor-env-secrets.md](./023-config-actor-env-secrets.md) | `internal/actor/config`：`ConfigActor` 三层（`Run > Namespace > Global`）`Env`/`Secret` 管理与第 0 秒 Preflight 解析 | 022 |
+| **024** | [024-process-registry-and-worker-daemon.md](./024-process-registry-and-worker-daemon.md) | `internal/actor/registry` + `internal/worker/daemon`：三态存活探测、槽位调度（`10`/`2`）、Worker 服务宿主与残留容器自清理 | 022 |
+| **025** | [025-node-actor-and-bridge.md](./025-node-actor-and-bridge.md) | `internal/actor/node`：`NodeActor` 权威状态机、日记流、插话队列、决策卡片、版本绑定批准与 `NodeControlPlane` 远端桥接 | 023, 024 |
+| **026** | [026-merge-actor-queue.md](./026-merge-actor-queue.md) | `internal/actor/merge`：目标分支全局串行持久队列、Worker 槽位调度执行 `ExecuteMergeCandidate` 与源头打回结果回报 | 024, 025 |
+| **027** | [027-apply-deferred-evaluator.md](./027-apply-deferred-evaluator.md) | `internal/applyeval`：上游公开值注入、`hcl.EvalContext` 延迟求值、`dynamic_worker` 展开与子 `module` 输入校验纯核心 | Stage 1 & 2 |
+| **028** | [028-operator-and-run-actor.md](./028-operator-and-run-actor.md) | `internal/actor/run`：`OperatorActor` + `RunActor` 非阻塞全图推进、嵌套 `module`、`fallback` 级联 `epoch`、暂停/恢复/`rerun` 与延迟删除 | 021, 023–027 |
+| **029** | [029-rest-ws-api-server.md](./029-rest-ws-api-server.md) | `internal/server`：双端口隔离、Bearer/`Origin` 鉴权、`/api/v1/*` 全量幂等端点、CSP 隔离预览与 `/api/v1/ws` 实时流 | 028 |
+| **030** | [030-cli-server-worker-apply.md](./030-cli-server-worker-apply.md) | `internal/cli` + `cmd/sofa`：`sofa server [--dev]`、`sofa worker`、`sofa apply`（双输入 + `Ctrl+C` 即时中断）及全套运维/凭据 CLI | 029 |
+| **031** | [031-vue3-dashboard.md](./031-vue3-dashboard.md) | `web/` + `internal/webui`：Vue 3 + TS + Vitest 安全看板、DAG 拓扑/日志/凭据管理、决策审批与无 `allow-same-origin` 沙箱 `iframe` + `go:embed` | 029, 030 |
+| **032** | [032-self-host-example-and-plugin-bundle.md](./032-self-host-example-and-plugin-bundle.md) | `examples/copilot-agy-self-host/` + `scripts/install-local-plugins.go`：双栈异构自举模板、本地 Linux 插件一键安装与 `sofa plan` 自动化单测 | 030 |
