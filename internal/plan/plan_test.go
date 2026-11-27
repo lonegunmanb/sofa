@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1031,6 +1032,417 @@ func rewriteZip(t *testing.T, srcPath, dstPath string, mutate func([]zipEntry) [
 	}
 	require.NoError(t, zw.Close())
 	require.NoError(t, out.Close())
+}
+
+func TestArchivePreservesPermissionsAndIncludesModeInBundleSHA256(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "scripts"), 0o755))
+	plainPath := filepath.Join(configDir, "main.sofa.hcl")
+	shebangPath := filepath.Join(configDir, "scripts", "run.sh")
+	require.NoError(t, os.WriteFile(plainPath, []byte("# comment\n"), 0o600))
+	// Write shebang file WITHOUT host +x bit (0600 / 0644).
+	require.NoError(t, os.WriteFile(shebangPath, []byte("#!/usr/bin/env bash\necho hi\n"), 0o644))
+
+	p, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		PluginLock: &harness.PluginLockFile{
+			FormatVersion: harness.LockFormatVersion,
+			Plugins:       []harness.PluginLockEntry{},
+		},
+	})
+	require.NoError(t, err)
+
+	lock := &harness.PluginLockFile{
+		FormatVersion: harness.LockFormatVersion,
+		Plugins: []harness.PluginLockEntry{
+			{
+				Name:              "local",
+				Source:            "github.com/example/local",
+				Version:           "0.1.0",
+				VerifiedSignature: "none",
+				Assets: map[string]harness.PluginAsset{
+					"linux_amd64": {
+						Filename: "sofa-harness-local_linux_amd64.zip",
+						SHA256:   strings.Repeat("a", 64),
+					},
+				},
+			},
+		},
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "perms.sofaplan")
+	require.NoError(t, plan.SaveArchive(archivePath, p, plan.ArchiveSource{
+		ConfigDir:  configDir,
+		PluginLock: lock,
+	}))
+
+	zr, err := zip.OpenReader(archivePath)
+	require.NoError(t, err)
+	defer func() { _ = zr.Close() }()
+
+	modesByName := make(map[string]fs.FileMode, len(zr.File))
+	for _, f := range zr.File {
+		modesByName[f.Name] = f.Mode()
+	}
+	assert.Equal(t, fs.ModeDir|0o755, modesByName["bundle/config/scripts/"])
+	assert.Equal(t, fs.FileMode(0o644), modesByName["bundle/config/main.sofa.hcl"])
+	assert.Equal(t, fs.FileMode(0o755), modesByName["bundle/config/scripts/run.sh"])
+	assert.Equal(t, fs.FileMode(0o644), modesByName["plugins.lock.json"])
+
+	extractDir := t.TempDir()
+	loaded, err := plan.LoadArchive(archivePath, extractDir, plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		dirInfo, err := os.Stat(filepath.Join(loaded.ConfigDir, "scripts"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o755), dirInfo.Mode().Perm())
+
+		plainInfo, err := os.Stat(filepath.Join(loaded.ConfigDir, "main.sofa.hcl"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o644), plainInfo.Mode().Perm())
+
+		scriptInfo, err := os.Stat(filepath.Join(loaded.ConfigDir, "scripts", "run.sh"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o755), scriptInfo.Mode().Perm())
+
+		lockInfo, err := os.Stat(filepath.Join(loaded.ExtractDir, "plugins.lock.json"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o644), lockInfo.Mode().Perm())
+	}
+
+	// Changing a file's mode (e.g. turning plain text into shebang) changes BundleSHA256 even if
+	// we compare against another archive whose zip header has 0755 vs 0644 on identical bytes.
+	tamperedModeZip := filepath.Join(t.TempDir(), "tampered-mode.sofaplan")
+	rewriteZip(t, archivePath, tamperedModeZip, func(entries []zipEntry) []zipEntry {
+		for i := range entries {
+			if entries[i].name == "bundle/config/main.sofa.hcl" {
+				entries[i].mode = 0o755
+			}
+		}
+		return entries
+	})
+	_, loadErr := plan.LoadArchive(tamperedModeZip, t.TempDir(), plan.LoadArchiveOptions{})
+	require.ErrorContains(t, loadErr, "bundle_sha256")
+
+	// Also verify BundleSHA256 differs between 0644 and 0755 on identical non-shebang file (on Unix via chmod,
+	// and everywhere via zip mode rewriting / manifest check).
+	if runtime.GOOS != "windows" {
+		hostExecDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(hostExecDir, "run.bin"), []byte("binary-ish"), 0o755))
+		hostExecPlan, err := plan.New(plan.Args{Directory: hostExecDir, BundlePath: "config"})
+		require.NoError(t, err)
+		hostExecArchive := filepath.Join(t.TempDir(), "host-exec.sofaplan")
+		require.NoError(t, plan.SaveArchive(hostExecArchive, hostExecPlan, plan.ArchiveSource{ConfigDir: hostExecDir}))
+
+		loadedExec, err := plan.LoadArchive(hostExecArchive, t.TempDir(), plan.LoadArchiveOptions{})
+		require.NoError(t, err)
+		execInfo, err := os.Stat(filepath.Join(loadedExec.ConfigDir, "run.bin"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o755), execInfo.Mode().Perm())
+
+		require.NoError(t, os.Chmod(filepath.Join(hostExecDir, "run.bin"), 0o644))
+		hostPlainArchive := filepath.Join(t.TempDir(), "host-plain.sofaplan")
+		require.NoError(t, plan.SaveArchive(hostPlainArchive, hostExecPlan, plan.ArchiveSource{ConfigDir: hostExecDir}))
+		loadedPlain, err := plan.LoadArchive(hostPlainArchive, t.TempDir(), plan.LoadArchiveOptions{})
+		require.NoError(t, err)
+		assert.NotEqual(t, loadedPlain.Manifest.BundleSHA256, loadedExec.Manifest.BundleSHA256)
+	}
+
+	altDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(altDir, "main.sofa.hcl"), []byte("#!/bin/sh\n"), 0o644))
+	altArchive := filepath.Join(t.TempDir(), "alt.sofaplan")
+	altPlan, err := plan.New(plan.Args{Directory: altDir, BundlePath: "config"})
+	require.NoError(t, err)
+	require.NoError(t, plan.SaveArchive(altArchive, altPlan, plan.ArchiveSource{ConfigDir: altDir}))
+	loadedAlt, err := plan.LoadArchive(altArchive, t.TempDir(), plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	plainAltDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(plainAltDir, "main.sofa.hcl"), []byte("# /bin/sh\n"), 0o644))
+	plainAltArchive := filepath.Join(t.TempDir(), "plain-alt.sofaplan")
+	plainAltPlan, err := plan.New(plan.Args{Directory: plainAltDir, BundlePath: "config"})
+	require.NoError(t, err)
+	require.NoError(t, plan.SaveArchive(plainAltArchive, plainAltPlan, plan.ArchiveSource{ConfigDir: plainAltDir}))
+	loadedPlainAlt, err := plan.LoadArchive(plainAltArchive, t.TempDir(), plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+	assert.NotEqual(t, loadedPlainAlt.Manifest.BundleSHA256, loadedAlt.Manifest.BundleSHA256)
+}
+
+func TestSkillDirectoriesClassificationBundlingAndValidation(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	configDir := filepath.Join(workspace, "cfg")
+	extSkillsDir := filepath.Join(workspace, "external-skills")
+	absExtSkillsDir := filepath.Join(workspace, "abs-skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "skills", "in-bundle"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "skills", "in-bundle", "SKILL.md"), []byte("# InBundle\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(extSkillsDir, "ext-a", "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(extSkillsDir, "ext-a", "SKILL.md"), []byte("# ExtA\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(extSkillsDir, "ext-a", "scripts", "helper.sh"), []byte("#!/bin/sh\necho ok\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(absExtSkillsDir, "abs-a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(absExtSkillsDir, "abs-a", "SKILL.md"), []byte("# AbsA\n"), 0o644))
+
+	expectedExtSum := sha256.Sum256([]byte(filepath.Clean(extSkillsDir)))
+	expectedExtHash := hex.EncodeToString(expectedExtSum[:])[:16]
+	expectedAbsSum := sha256.Sum256([]byte(filepath.Clean(absExtSkillsDir)))
+	expectedAbsHash := hex.EncodeToString(expectedAbsSum[:])[:16]
+
+	planned, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address:          "worker.main",
+				CanonicalAddress: "worker.main",
+				Kind:             "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"skill_directories": cty.ListVal([]cty.Value{
+						cty.StringVal("./skills"),
+						cty.StringVal("../external-skills"),
+						cty.StringVal(absExtSkillsDir),
+						cty.StringVal("/workspace/.agents/skills"),
+						cty.StringVal("/.sofa/imports/shared-skills"),
+					}),
+					"qc": cty.ObjectVal(map[string]cty.Value{
+						"skill_directories": cty.ListVal([]cty.Value{
+							cty.StringVal("../external-skills"),
+							cty.StringVal("/workspace/qc-skills"),
+						}),
+					}),
+				}),
+			},
+			{
+				Address:          "dynamic_worker.sweep",
+				CanonicalAddress: "dynamic_worker.sweep",
+				Kind:             "dynamic_worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"content": cty.ObjectVal(map[string]cty.Value{
+						"skill_directories": cty.ListVal([]cty.Value{
+							cty.StringVal("skills"),
+						}),
+						"qc": cty.ObjectVal(map[string]cty.Value{
+							"skill_directories": cty.ListVal([]cty.Value{
+								cty.StringVal("../external-skills"),
+							}),
+						}),
+					}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "skills.sofaplan")
+	require.NoError(t, plan.SaveArchive(archivePath, planned, plan.ArchiveSource{ConfigDir: configDir}))
+
+	// Verify zip header contains bundle/external_skills/<hash>/ with expected script mode 0755.
+	zr, err := zip.OpenReader(archivePath)
+	require.NoError(t, err)
+	defer func() { _ = zr.Close() }()
+	zipModes := make(map[string]fs.FileMode, len(zr.File))
+	for _, f := range zr.File {
+		zipModes[f.Name] = f.Mode()
+	}
+	assert.Equal(t, fs.FileMode(0o644), zipModes["bundle/external_skills/"+expectedExtHash+"/ext-a/SKILL.md"])
+	assert.Equal(t, fs.FileMode(0o755), zipModes["bundle/external_skills/"+expectedExtHash+"/ext-a/scripts/helper.sh"])
+	assert.Equal(t, fs.FileMode(0o644), zipModes["bundle/external_skills/"+expectedAbsHash+"/abs-a/SKILL.md"])
+
+	// Extract and verify round-trip plan rewrites and extracted files.
+	extractDir := t.TempDir()
+	loaded, err := plan.LoadArchive(archivePath, extractDir, plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	byAddr := make(map[string]plan.NodeSpec, len(loaded.Plan.Nodes()))
+	for _, n := range loaded.Plan.Nodes() {
+		byAddr[n.Address] = n
+	}
+
+	workerDirs := ctyStringList(t, byAddr["worker.main"].Config.GetAttr("skill_directories"))
+	assert.Equal(t, []string{
+		"config/skills",
+		"external_skills/" + expectedExtHash,
+		"external_skills/" + expectedAbsHash,
+		"/workspace/.agents/skills",
+		"/.sofa/imports/shared-skills",
+	}, workerDirs)
+
+	qcDirs := ctyStringList(t, byAddr["worker.main"].Config.GetAttr("qc").GetAttr("skill_directories"))
+	assert.Equal(t, []string{
+		"external_skills/" + expectedExtHash,
+		"/workspace/qc-skills",
+	}, qcDirs)
+
+	dynDirs := ctyStringList(t, byAddr["dynamic_worker.sweep"].Config.GetAttr("content").GetAttr("skill_directories"))
+	assert.Equal(t, []string{"config/skills"}, dynDirs)
+	dynQCDirs := ctyStringList(t, byAddr["dynamic_worker.sweep"].Config.GetAttr("content").GetAttr("qc").GetAttr("skill_directories"))
+	assert.Equal(t, []string{"external_skills/" + expectedExtHash}, dynQCDirs)
+
+	extMD, err := os.ReadFile(filepath.Join(loaded.ExtractDir, "external_skills", expectedExtHash, "ext-a", "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# ExtA\n", string(extMD))
+
+	if runtime.GOOS != "windows" {
+		scriptInfo, err := os.Stat(filepath.Join(loaded.ExtractDir, "external_skills", expectedExtHash, "ext-a", "scripts", "helper.sh"))
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0o755), scriptInfo.Mode().Perm())
+	}
+
+	// Missing absolute host path must Fail-Fast with node address and raw path.
+	missingAbs := filepath.Join(workspace, "does-not-exist")
+	missingAbsPlan, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address:          "worker.fail",
+				CanonicalAddress: "worker.fail",
+				Kind:             "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"skill_directories": cty.ListVal([]cty.Value{cty.StringVal(missingAbs)}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+	err = plan.SaveArchive(filepath.Join(t.TempDir(), "missing-abs.sofaplan"), missingAbsPlan, plan.ArchiveSource{ConfigDir: configDir})
+	require.ErrorContains(t, err, "worker.fail")
+	require.ErrorContains(t, err, missingAbs)
+
+	// Missing relative escaping path in QC must Fail-Fast with node address and raw path.
+	missingQCPlan, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address:          "worker.qc_fail",
+				CanonicalAddress: "worker.qc_fail",
+				Kind:             "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"qc": cty.ObjectVal(map[string]cty.Value{
+						"skill_directories": cty.ListVal([]cty.Value{cty.StringVal("../missing-qc-ext")}),
+					}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+	err = plan.SaveArchive(filepath.Join(t.TempDir(), "missing-qc-ext.sofaplan"), missingQCPlan, plan.ArchiveSource{ConfigDir: configDir})
+	require.ErrorContains(t, err, "worker.qc_fail")
+	require.ErrorContains(t, err, "../missing-qc-ext")
+
+	// Reject unsafe bundle/external_skills/../x entries on LoadArchive.
+	badExtZip := filepath.Join(t.TempDir(), "bad-ext.sofaplan")
+	rewriteZip(t, archivePath, badExtZip, func(entries []zipEntry) []zipEntry {
+		return append(entries, zipEntry{name: "bundle/external_skills/../x", data: []byte("boom")})
+	})
+	_, loadErr := plan.LoadArchive(badExtZip, t.TempDir(), plan.LoadArchiveOptions{})
+	require.Error(t, loadErr)
+
+	// Missing relative in-bundle skill directory fails fast.
+	missingRelPlan, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address: "worker.rel_fail",
+				Kind:    "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"skill_directories": cty.ListVal([]cty.Value{cty.StringVal("./missing-rel-skills")}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+	err = plan.SaveArchive(filepath.Join(t.TempDir(), "missing-rel.sofaplan"), missingRelPlan, plan.ArchiveSource{ConfigDir: configDir})
+	require.ErrorContains(t, err, "worker.rel_fail")
+	require.ErrorContains(t, err, "./missing-rel-skills")
+
+	// plan.NormalizeSkillDirectories does not mutate the caller's input Plan.
+	origWorkerDirs := ctyStringList(t, planned.Nodes()[0].Config.GetAttr("skill_directories"))
+	assert.Equal(t, "./skills", origWorkerDirs[0])
+	assert.Equal(t, "../external-skills", origWorkerDirs[1])
+	normalizedOnly, err := plan.NormalizeSkillDirectories(planned, plan.ArchiveSource{ConfigDir: configDir})
+	require.NoError(t, err)
+	normWorkerDirs := ctyStringList(t, normalizedOnly.Nodes()[0].Config.GetAttr("skill_directories"))
+	assert.Equal(t, "config/skills", normWorkerDirs[0])
+	assert.Equal(t, "external_skills/"+expectedExtHash, normWorkerDirs[1])
+	assert.Equal(t, "./skills", ctyStringList(t, planned.Nodes()[0].Config.GetAttr("skill_directories"))[0])
+}
+
+func TestSkillDirectoriesHomeExpansionAndSymlinkRejection(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	configDir := t.TempDir()
+	homeSkills := filepath.Join(homeDir, "my-skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(homeSkills, "home-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(homeSkills, "home-skill", "SKILL.md"), []byte("# Home\n"), 0o644))
+
+	expectedSum := sha256.Sum256([]byte(filepath.Clean(homeSkills)))
+	expectedHash := hex.EncodeToString(expectedSum[:])[:16]
+
+	planned, err := plan.New(plan.Args{
+		Directory:  configDir,
+		BundlePath: "config",
+		Nodes: []plan.NodeSpec{
+			{
+				Address: "worker.home",
+				Kind:    "worker",
+				Config: cty.ObjectVal(map[string]cty.Value{
+					"skill_directories": cty.ListVal([]cty.Value{cty.StringVal("~/my-skills")}),
+				}),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "home.sofaplan")
+	require.NoError(t, plan.SaveArchive(archivePath, planned, plan.ArchiveSource{ConfigDir: configDir}))
+	loaded, err := plan.LoadArchive(archivePath, t.TempDir(), plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"external_skills/" + expectedHash}, ctyStringList(t, loaded.Plan.Nodes()[0].Config.GetAttr("skill_directories")))
+	content, err := os.ReadFile(filepath.Join(loaded.ExtractDir, "external_skills", expectedHash, "home-skill", "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# Home\n", string(content))
+
+	// Symlink inside external skill dir must fail fast.
+	symTarget := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(symTarget, "secret.txt"), []byte("secret"), 0o644))
+	extWithSym := filepath.Join(t.TempDir(), "ext-sym")
+	require.NoError(t, os.MkdirAll(extWithSym, 0o755))
+	if symErr := os.Symlink(filepath.Join(symTarget, "secret.txt"), filepath.Join(extWithSym, "link.txt")); symErr == nil {
+		symPlan, err := plan.New(plan.Args{
+			Directory:  configDir,
+			BundlePath: "config",
+			Nodes: []plan.NodeSpec{
+				{
+					Address: "worker.sym",
+					Kind:    "worker",
+					Config: cty.ObjectVal(map[string]cty.Value{
+						"skill_directories": cty.ListVal([]cty.Value{cty.StringVal(extWithSym)}),
+					}),
+				},
+			},
+		})
+		require.NoError(t, err)
+		err = plan.SaveArchive(filepath.Join(t.TempDir(), "sym.sofaplan"), symPlan, plan.ArchiveSource{ConfigDir: configDir})
+		require.ErrorContains(t, err, "symlink")
+	}
+}
+
+func ctyStringList(t *testing.T, v cty.Value) []string {
+	t.Helper()
+	var out []string
+	for it := v.ElementIterator(); it.Next(); {
+		_, elem := it.Element()
+		out = append(out, elem.AsString())
+	}
+	return out
 }
 
 var _ = hex.EncodeToString

@@ -290,10 +290,17 @@ func newPlanCommand(opts Options) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				var rootSourceDir string
+				if src := filepath.FromSlash(proj.State.Configuration.Source); filepath.IsAbs(src) {
+					if info, statErr := os.Stat(src); statErr == nil && info.IsDir() {
+						rootSourceDir = src
+					}
+				}
 				if err := plan.SaveArchive(resolvedOut, planned, plan.ArchiveSource{
-					ConfigDir:  proj.ConfigDirectory,
-					ModulesDir: proj.ModulesDirectory,
-					PluginLock: &lockFile,
+					ConfigDir:     proj.ConfigDirectory,
+					ModulesDir:    proj.ModulesDirectory,
+					RootSourceDir: rootSourceDir,
+					PluginLock:    &lockFile,
 				}); err != nil {
 					return fmt.Errorf("save plan archive %q: %w", resolvedOut, err)
 				}

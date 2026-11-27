@@ -183,6 +183,12 @@ worker "implement" {
 }
 ```
 
+**`skill_directories` 三类路径与 Plan/Archive 期 Fail-Fast 校验**：
+`worker`、`dynamic_worker`（Plan 期已知时）与 `qc` 中的 `skill_directories` 在打包 `.sofaplan` 时按以下规则分类校验并改写：
+1. **容器内路径**：以 `/workspace`（`/workspace` 或 `/workspace/...`）或 `/.sofa/imports/` 开头的路径代表克隆仓库或导入产物中的运行时目录；客户端不打包、不校验是否存在，在导出计划中保持原样。
+2. **Bundle 内路径**：`${path.module}/...` 求值结果（`config/...`、`modules/<name>/...`）或相对当前模块源目录且解析后仍位于模块/根 Bundle 树内的路径（如 `./skills`、`skills`、`../shared-skills`）；校验对应目录在 Bundle 中真实存在，缺失则立即报错（包含节点地址与路径），并将计划内路径规范化为 `config/...` 或 `modules/<name>/...`。
+3. **外部本地路径**：逃逸当前 Bundle 树的相对路径（如 `../agent-skills`）、`~/...`（展开用户主目录）及非 `/workspace` / `/.sofa/imports/` 的宿主机绝对路径（如 `D:/x`、`C:\x`、`/home/u/x`）；打包前必须在客户端存在且为目录（不允许符号链接，缺失或非法则 Fail-Fast 报错并指明节点地址与原始路径），整个目录树按权限规则打包进归档 `bundle/external_skills/<hash>/`（`<hash>` 为规范化绝对路径 SHA-256 前 16 位十六进制），并将计划内条目改写为 `external_skills/<hash>`。
+
 #### 4) `dynamic_worker "<name>"`
 
 运行时按上游确定后的映射展开独立节点与分支（空映射不生成节点或分支）；对外暴露 `.workers` 与 `.work_branches`：

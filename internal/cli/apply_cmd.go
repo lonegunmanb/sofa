@@ -213,9 +213,10 @@ func compileDirToSofaplanBytes(
 
 	archivePath := filepath.Join(tmpArchiveDir, "apply.sofaplan")
 	if err := plan.SaveArchive(archivePath, planned, plan.ArchiveSource{
-		ConfigDir:  proj.ConfigDirectory,
-		ModulesDir: proj.ModulesDirectory,
-		PluginLock: &lockFile,
+		ConfigDir:     proj.ConfigDirectory,
+		ModulesDir:    proj.ModulesDirectory,
+		RootSourceDir: configDir,
+		PluginLock:    &lockFile,
 	}); err != nil {
 		return nil, fmt.Errorf("package .sofaplan archive: %w", err)
 	}

@@ -899,6 +899,9 @@ func decodeWorkerConfigFromDeferredObject(val cty.Value, planned workerspec.Conf
 		{"skills", &cfg.Skills},
 		{"disabled_skills", &cfg.DisabledSkills},
 	} {
+		if pair.attr == "skill_directories" && len(planned.SkillDirectories) > 0 {
+			continue
+		}
 		if s, err := decodeOptionalStringSliceVal(attrOrNil(val, pair.attr), scope+" "+pair.attr); err != nil {
 			return workerspec.Config{}, err
 		} else if s != nil {
@@ -1299,6 +1302,10 @@ func decodeQCFromPlanVal(val cty.Value, plannedQC *workerspec.QCConfig, scope st
 	}
 	mp := defaultNullObject(attrOrNil(val, "model_provider"))
 	mpSet := readBoolAttr(val, "model_provider_set", hasAttr(val, "model_provider"))
+	skillDirs := readStringSliceAttr(val, "skill_directories")
+	if plannedQC != nil && len(plannedQC.SkillDirectories) > 0 {
+		skillDirs = slices.Clone(plannedQC.SkillDirectories)
+	}
 	return &workerspec.QCConfig{
 		Criteria:                criteria,
 		Sandbox:                 defaultNullObject(attrOrNil(val, "sandbox")),
@@ -1317,7 +1324,7 @@ func decodeQCFromPlanVal(val cty.Value, plannedQC *workerspec.QCConfig, scope st
 		ToolCallQuota:           readOptionalIntMap(attrOrNil(val, "tool_call_quota")),
 		AllowedTools:            readOptionalStringSlice(attrOrNil(val, "allowed_tools")),
 		DisallowedTools:         readOptionalStringSlice(attrOrNil(val, "disallowed_tools")),
-		SkillDirectories:        readStringSliceAttr(val, "skill_directories"),
+		SkillDirectories:        skillDirs,
 		Skills:                  readStringSliceAttr(val, "skills"),
 		DisabledSkills:          readStringSliceAttr(val, "disabled_skills"),
 		Retry:                   decodeRetryOverrideFromPlanConfig(attrOrNil(val, "retry")),

@@ -347,3 +347,72 @@ func writeCLIFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(strings.TrimLeft(content, "\n")), 0o600))
 }
+
+func TestCLIPlanAndApplyResolveExternalSkillDirsRelativeToOriginalSource(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	wfDir := filepath.Join(workspace, "workflow")
+	extDir := filepath.Join(workspace, "external-skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(wfDir, "skills", "local-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(wfDir, "skills", "local-skill", "SKILL.md"), []byte("# Local\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(extDir, "ext-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(extDir, "ext-skill", "SKILL.md"), []byte("# External\n"), 0o644))
+
+	writeCLIFile(t, filepath.Join(wfDir, "main.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+
+sandbox "sb" {
+  runtime = "podman"
+  image   = "alpine:latest"
+}
+
+harness "local" {}
+
+worker "build" {
+  based_source      = source.project.branch
+  model             = "gpt-5"
+  system_prompt     = "Build"
+  skill_directories = ["./skills", "../external-skills", "/workspace/.agents/skills"]
+}
+`)
+
+	opts := cli.Options{WorkingDir: workspace}
+	var out, errBuf bytes.Buffer
+	require.Equal(t, cli.ExitSuccess, cli.Run(t.Context(), []string{"init", "./workflow", "--state-dir", ".sofa"}, strings.NewReader(""), &out, &errBuf, opts), errBuf.String())
+
+	out.Reset()
+	errBuf.Reset()
+	require.Equal(t, cli.ExitSuccess, cli.Run(t.Context(), []string{"plan", "--state-dir", ".sofa", "--out", "out.sofaplan"}, strings.NewReader(""), &out, &errBuf, opts), errBuf.String())
+
+	loaded, err := plan.LoadArchive(filepath.Join(workspace, "out.sofaplan"), t.TempDir(), plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	expectedSum := sha256.Sum256([]byte(filepath.Clean(extDir)))
+	expectedHash := hex.EncodeToString(expectedSum[:])[:16]
+
+	var workerNode plan.NodeSpec
+	for _, n := range loaded.Plan.Nodes() {
+		if n.Address == "worker.build" {
+			workerNode = n
+		}
+	}
+	require.Equal(t, "worker.build", workerNode.Address)
+	var gotDirs []string
+	for it := workerNode.Config.GetAttr("skill_directories").ElementIterator(); it.Next(); {
+		_, elem := it.Element()
+		gotDirs = append(gotDirs, elem.AsString())
+	}
+	assert.Equal(t, []string{
+		"config/skills",
+		"external_skills/" + expectedHash,
+		"/workspace/.agents/skills",
+	}, gotDirs)
+
+	extBytes, err := os.ReadFile(filepath.Join(loaded.ExtractDir, "external_skills", expectedHash, "ext-skill", "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# External\n", string(extBytes))
+}

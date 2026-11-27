@@ -2,6 +2,7 @@ package plan
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -48,9 +49,10 @@ type Manifest struct {
 
 // ArchiveSource provides the static bundle directories and optional lockfile for SaveArchive.
 type ArchiveSource struct {
-	ConfigDir  string
-	ModulesDir string
-	PluginLock *harness.PluginLockFile
+	ConfigDir     string
+	ModulesDir    string
+	RootSourceDir string
+	PluginLock    *harness.PluginLockFile
 }
 
 // LoadArchiveOptions configures resource limits when unpacking a .sofaplan archive.
@@ -70,13 +72,34 @@ type LoadedArchive struct {
 	ModulesDir string
 }
 
+const (
+	archiveDirMode  fs.FileMode = os.ModeDir | 0o755
+	archiveExecMode fs.FileMode = 0o755
+	archiveFileMode fs.FileMode = 0o644
+)
+
 type archiveEntry struct {
 	name  string
 	isDir bool
+	mode  fs.FileMode
 	data  []byte
 }
 
-// SaveArchive packages planned, optional plugins.lock.json, and static config/module bundles
+func normalizeArchiveFileMode(mode fs.FileMode) fs.FileMode {
+	if mode.Perm()&0o111 != 0 {
+		return archiveExecMode
+	}
+	return archiveFileMode
+}
+
+func determineBundleFileMode(hostMode fs.FileMode, data []byte) fs.FileMode {
+	if hostMode.Perm()&0o111 != 0 || bytes.HasPrefix(data, []byte("#!")) {
+		return archiveExecMode
+	}
+	return archiveFileMode
+}
+
+// SaveArchive packages planned, optional plugins.lock.json, and static config/module/external-skill bundles
 // into a deterministic, 0600-restricted .sofaplan ZIP archive.
 func SaveArchive(archivePath string, planned *Plan, source ArchiveSource) error {
 	if planned == nil {
@@ -93,18 +116,23 @@ func SaveArchive(archivePath string, planned *Plan, source ArchiveSource) error 
 	if err != nil {
 		return err
 	}
-	if err := validateSkillDirectoriesInBundle(planned, bundleDirs); err != nil {
+	normalizedPlan, extEntries, err := normalizeAndCollectSkillDirectories(planned, source, bundleDirs)
+	if err != nil {
 		return err
 	}
+	bundleEntries = append(bundleEntries, extEntries...)
+	sort.Slice(bundleEntries, func(i, j int) bool {
+		return bundleEntries[i].name < bundleEntries[j].name
+	})
 
-	planBytes, err := Marshal(planned)
+	planBytes, err := Marshal(normalizedPlan)
 	if err != nil {
 		return err
 	}
 
 	lock := source.PluginLock
 	if lock == nil {
-		lock = planned.PluginLock()
+		lock = normalizedPlan.PluginLock()
 	}
 
 	var lockBytes []byte
@@ -137,16 +165,19 @@ func SaveArchive(archivePath string, planned *Plan, source ArchiveSource) error 
 
 	allEntries := make([]archiveEntry, 0, len(bundleEntries)+3)
 	allEntries = append(allEntries,
-		archiveEntry{name: manifestEntryName, data: manifestBytes},
-		archiveEntry{name: planEntryName, data: planBytes},
+		archiveEntry{name: manifestEntryName, mode: archiveFileMode, data: manifestBytes},
+		archiveEntry{name: planEntryName, mode: archiveFileMode, data: planBytes},
 	)
 	if len(lockBytes) > 0 {
-		allEntries = append(allEntries, archiveEntry{name: pluginLockEntryName, data: lockBytes})
+		allEntries = append(allEntries, archiveEntry{name: pluginLockEntryName, mode: archiveFileMode, data: lockBytes})
 	}
 	allEntries = append(allEntries, bundleEntries...)
 	sort.Slice(allEntries, func(i, j int) bool {
 		return allEntries[i].name < allEntries[j].name
 	})
+	if err := validateArchiveBudget(allEntries); err != nil {
+		return err
+	}
 
 	absArchive, err := filepath.Abs(archivePath)
 	if err != nil {
@@ -331,7 +362,7 @@ func readValidatedArchiveEntries(archivePath string, opts LoadArchiveOptions) ([
 			if name == manifestEntryName || name == planEntryName || name == pluginLockEntryName {
 				return nil, fmt.Errorf("archive entry %q must be a regular file", name)
 			}
-			entries = append(entries, archiveEntry{name: name, isDir: true})
+			entries = append(entries, archiveEntry{name: name, isDir: true, mode: archiveDirMode})
 			continue
 		}
 
@@ -343,7 +374,7 @@ func readValidatedArchiveEntries(archivePath string, opts LoadArchiveOptions) ([
 		if totalBytes > opts.MaxTotalBytes {
 			return nil, fmt.Errorf("archive total uncompressed size exceeds maximum %d bytes", opts.MaxTotalBytes)
 		}
-		entries = append(entries, archiveEntry{name: name, data: data})
+		entries = append(entries, archiveEntry{name: name, mode: normalizeArchiveFileMode(f.Mode()), data: data})
 	}
 	return entries, nil
 }
@@ -387,7 +418,8 @@ func validateZipEntry(f *zip.File) (string, bool, error) {
 		return trimmed, isDir, nil
 	default:
 		if trimmed == "bundle/config" || strings.HasPrefix(trimmed, "bundle/config/") ||
-			trimmed == "bundle/modules" || strings.HasPrefix(trimmed, "bundle/modules/") {
+			trimmed == "bundle/modules" || strings.HasPrefix(trimmed, "bundle/modules/") ||
+			trimmed == "bundle/external_skills" || strings.HasPrefix(trimmed, "bundle/external_skills/") {
 			if isDir {
 				return trimmed + "/", true, nil
 			}
@@ -415,7 +447,7 @@ func readZipEntryBounded(f *zip.File, maxBytes int64) ([]byte, error) {
 }
 
 func extractBundleEntries(extractDir string, bundleEntries []archiveEntry, lockBytes []byte, hasLock bool) error {
-	if err := os.MkdirAll(extractDir, 0o700); err != nil {
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return fmt.Errorf("create extract directory: %w", err)
 	}
 	root, err := os.OpenRoot(extractDir)
@@ -425,7 +457,7 @@ func extractBundleEntries(extractDir string, bundleEntries []archiveEntry, lockB
 	defer func() { _ = root.Close() }()
 
 	for _, base := range []string{"config", "modules"} {
-		if err := root.MkdirAll(base, 0o700); err != nil {
+		if err := root.MkdirAll(base, 0o755); err != nil {
 			return fmt.Errorf("create extract %s directory: %w", base, err)
 		}
 	}
@@ -435,38 +467,40 @@ func extractBundleEntries(extractDir string, bundleEntries []archiveEntry, lockB
 		if entry.isDir {
 			dirRel := strings.TrimSuffix(rel, "/")
 			if dirRel != "" {
-				if err := root.MkdirAll(dirRel, 0o700); err != nil {
+				if err := root.MkdirAll(dirRel, 0o755); err != nil {
 					return fmt.Errorf("create directory %q: %w", dirRel, err)
 				}
 			}
 			continue
 		}
 		if parent := path.Dir(rel); parent != "." && parent != "" {
-			if err := root.MkdirAll(parent, 0o700); err != nil {
+			if err := root.MkdirAll(parent, 0o755); err != nil {
 				return fmt.Errorf("create parent directory %q: %w", parent, err)
 			}
 		}
-		if err := writeRootFile(root, rel, entry.data); err != nil {
+		if err := writeRootFile(root, rel, entry.data, entry.mode); err != nil {
 			return err
 		}
 	}
 
 	if hasLock {
-		if err := writeRootFile(root, pluginLockEntryName, lockBytes); err != nil {
+		if err := writeRootFile(root, pluginLockEntryName, lockBytes, archiveFileMode); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func writeRootFile(root *os.Root, rel string, data []byte) error {
-	f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+func writeRootFile(root *os.Root, rel string, data []byte, mode fs.FileMode) error {
+	perm := normalizeArchiveFileMode(mode)
+	f, err := root.OpenFile(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return fmt.Errorf("create extracted file %q: %w", rel, err)
 	}
 	_, writeErr := f.Write(data)
+	chmodErr := f.Chmod(perm)
 	closeErr := f.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
+	if err := errors.Join(writeErr, chmodErr, closeErr); err != nil {
 		return fmt.Errorf("write extracted file %q: %w", rel, err)
 	}
 	return nil
@@ -490,9 +524,9 @@ func writeTempZip(dir string, entries []archiveEntry) (string, error) {
 		}
 		if entry.isDir {
 			hdr.Method = zip.Store
-			hdr.SetMode(os.ModeDir | 0o755)
+			hdr.SetMode(archiveDirMode)
 		} else {
-			hdr.SetMode(0o644)
+			hdr.SetMode(normalizeArchiveFileMode(entry.mode))
 		}
 		w, err := zw.CreateHeader(hdr)
 		if err != nil {
@@ -737,7 +771,7 @@ func walkCleanBundleDir(
 			}
 			bundleDir := bundlePrefix + "/" + slashRel
 			dirs[bundleDir] = true
-			entries = append(entries, archiveEntry{name: bundleDir + "/", isDir: true})
+			entries = append(entries, archiveEntry{name: bundleDir + "/", isDir: true, mode: archiveDirMode})
 			return nil
 		}
 		if !linfo.Mode().IsRegular() {
@@ -754,7 +788,11 @@ func walkCleanBundleDir(
 		if err != nil {
 			return err
 		}
-		entries = append(entries, archiveEntry{name: bundlePrefix + "/" + slashRel, data: data})
+		entries = append(entries, archiveEntry{
+			name: bundlePrefix + "/" + slashRel,
+			mode: determineBundleFileMode(linfo.Mode(), data),
+			data: data,
+		})
 		return nil
 	})
 	if err != nil {
@@ -788,145 +826,34 @@ func readRootRegularFile(root *os.Root, rel string) ([]byte, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, DefaultMaxSingleFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %w", rel, err)
+	}
+	if int64(len(data)) > DefaultMaxSingleFileBytes {
+		return nil, fmt.Errorf("bundle entry %q exceeds maximum single file size %d bytes", rel, DefaultMaxSingleFileBytes)
 	}
 	return data, nil
 }
 
-func validateSkillDirectoriesInBundle(planned *Plan, bundleDirs map[string]bool) error {
-	var walk func(*Plan, string) error
-	walk = func(p *Plan, defaultBundleBase string) error {
-		if p == nil {
-			return nil
-		}
-		base := p.bundlePath
-		if base == "" {
-			base = defaultBundleBase
-		}
-		for _, node := range p.nodes {
-			switch node.Kind {
-			case "worker":
-				if err := checkConfigSkillDirs(node, node.Config, base, bundleDirs); err != nil {
-					return err
-				}
-			case "dynamic_worker":
-				unmarked, _ := node.Config.UnmarkDeep()
-				if unmarked != cty.NilVal && unmarked.IsKnown() && !unmarked.IsNull() && unmarked.Type().IsObjectType() && unmarked.Type().HasAttribute("content") {
-					if err := checkConfigSkillDirs(node, unmarked.GetAttr("content"), base, bundleDirs); err != nil {
-						return err
-					}
-				}
-			case "module":
-				if node.Module != nil {
-					childBase := node.Module.BundlePath
-					if childBase == "" {
-						childBase = node.Module.Plan.BundlePath()
-					}
-					if err := walk(node.Module.Plan, childBase); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		return nil
+func validateArchiveBudget(entries []archiveEntry) error {
+	if len(entries) > DefaultMaxEntries {
+		return fmt.Errorf("plan archive entry count %d exceeds maximum %d", len(entries), DefaultMaxEntries)
 	}
-	return walk(planned, "config")
-}
-
-func checkConfigSkillDirs(node NodeSpec, cfg cty.Value, moduleBundlePath string, bundleDirs map[string]bool) error {
-	unmarked, _ := cfg.UnmarkDeep()
-	if unmarked == cty.NilVal || !unmarked.IsKnown() || unmarked.IsNull() || !unmarked.Type().IsObjectType() {
-		return nil
-	}
-	if err := checkSkillDirListAttr(node, unmarked, "skill_directories", moduleBundlePath, bundleDirs); err != nil {
-		return err
-	}
-	if unmarked.Type().HasAttribute("qc") {
-		qc := unmarked.GetAttr("qc")
-		if qc.IsKnown() && !qc.IsNull() && qc.Type().IsObjectType() {
-			if err := checkSkillDirListAttr(node, qc, "skill_directories", moduleBundlePath, bundleDirs); err != nil {
-				return err
-			}
+	var total int64
+	for _, entry := range entries {
+		if entry.isDir {
+			continue
+		}
+		if int64(len(entry.data)) > DefaultMaxSingleFileBytes {
+			return fmt.Errorf("archive entry %q exceeds maximum single file size %d bytes", entry.name, DefaultMaxSingleFileBytes)
+		}
+		total += int64(len(entry.data))
+		if total > DefaultMaxTotalBytes {
+			return fmt.Errorf("archive total uncompressed size exceeds maximum %d bytes", DefaultMaxTotalBytes)
 		}
 	}
 	return nil
-}
-
-func checkSkillDirListAttr(
-	node NodeSpec,
-	obj cty.Value,
-	attrName string,
-	moduleBundlePath string,
-	bundleDirs map[string]bool,
-) error {
-	if !obj.Type().HasAttribute(attrName) {
-		return nil
-	}
-	list := obj.GetAttr(attrName)
-	if !list.IsKnown() || list.IsNull() {
-		return nil
-	}
-	for it := list.ElementIterator(); it.Next(); {
-		_, item := it.Element()
-		if !item.IsKnown() || item.IsNull() || !item.Type().Equals(cty.String) {
-			continue
-		}
-		raw := item.AsString()
-		bundlePath, isBundle, err := resolveBundleSkillDir(raw, moduleBundlePath)
-		if err != nil {
-			addr := node.CanonicalAddress
-			if addr == "" {
-				addr = node.Address
-			}
-			return fmt.Errorf("%s skill_directories entry %q is invalid: %w", addr, raw, err)
-		}
-		if !isBundle {
-			continue
-		}
-		if !bundleDirs[bundlePath] {
-			addr := node.CanonicalAddress
-			if addr == "" {
-				addr = node.Address
-			}
-			return fmt.Errorf("%s references missing skill directory %q (expected %q in archive bundle)", addr, raw, bundlePath)
-		}
-	}
-	return nil
-}
-
-func resolveBundleSkillDir(raw, moduleBundlePath string) (string, bool, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", false, fmt.Errorf("must not be empty")
-	}
-	slash := filepath.ToSlash(trimmed)
-	if strings.HasPrefix(slash, "/") || (len(slash) >= 2 && isASCIIAlpha(slash[0]) && slash[1] == ':') {
-		return "", false, nil
-	}
-	cleaned := path.Clean(slash)
-	switch {
-	case cleaned == "config" || strings.HasPrefix(cleaned, "config/") ||
-		cleaned == "modules" || strings.HasPrefix(cleaned, "modules/"):
-		return "bundle/" + cleaned, true, nil
-	case cleaned == ".." || strings.HasPrefix(cleaned, "../"):
-		return "", false, fmt.Errorf("escapes bundle directory")
-	default:
-		base := moduleBundlePath
-		if base == "" {
-			base = "config"
-		}
-		joined := path.Clean(path.Join(base, cleaned))
-		if joined == ".." || strings.HasPrefix(joined, "../") {
-			return "", false, fmt.Errorf("escapes bundle directory")
-		}
-		if joined == "config" || strings.HasPrefix(joined, "config/") ||
-			joined == "modules" || strings.HasPrefix(joined, "modules/") {
-			return "bundle/" + joined, true, nil
-		}
-		return "", false, nil
-	}
 }
 
 func computeBundleSHA256(entries []archiveEntry) string {
@@ -941,12 +868,10 @@ func computeBundleSHA256(entries []archiveEntry) string {
 		h.Write([]byte(entry.name))
 		h.Write([]byte{0})
 		if entry.isDir {
-			h.Write([]byte{'D', 0})
+			fmt.Fprintf(h, "D\x00%04o\x00", archiveDirMode.Perm())
 			continue
 		}
-		h.Write([]byte{'F', 0})
-		h.Write([]byte(fmt.Sprintf("%d", len(entry.data))))
-		h.Write([]byte{0})
+		fmt.Fprintf(h, "F\x00%04o\x00%d\x00", normalizeArchiveFileMode(entry.mode), len(entry.data))
 		h.Write(entry.data)
 		h.Write([]byte{0})
 	}

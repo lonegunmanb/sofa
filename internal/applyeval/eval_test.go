@@ -1192,3 +1192,66 @@ dynamic_worker "verify" {
 	assert.Equal(t, "unit", authCfg.QC.Gatekeepers[0].Name)
 	assert.Equal(t, []string{"go", "test", "-run", "TestAuth"}, authCfg.QC.Gatekeepers[0].Command)
 }
+
+func TestApplyEvalPreservesNormalizedExternalSkillDirectoriesAcrossDeferredEval(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	rootDir := filepath.Join(workspace, "wf")
+	extDir := filepath.Join(workspace, "ext-skills")
+	extractDir := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "ext.sofaplan")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "skills", "local"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "skills", "local", "SKILL.md"), []byte("# Local\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(extDir, "ext"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(extDir, "ext", "SKILL.md"), []byte("# Ext\n"), 0o644))
+
+	writeHCLFile(t, filepath.Join(rootDir, "main.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+sandbox "go_env" {
+  runtime = "podman"
+  image   = "alpine:latest"
+}
+harness "copilot" {}
+worker "implement" {
+  based_source      = source.project.branch
+  model             = "gpt-5"
+  system_prompt     = "Implement"
+  skill_directories = ["./skills", "../ext-skills", "/workspace/.agents/skills"]
+  qc {
+    skill_directories = ["../ext-skills"]
+    criteria = {
+      ok = "check"
+    }
+  }
+}
+`)
+
+	exported := compileTestPlan(t, rootDir)
+	require.NoError(t, plan.SaveArchive(archivePath, exported, plan.ArchiveSource{ConfigDir: rootDir}))
+	loaded, err := plan.LoadArchive(archivePath, extractDir, plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+
+	planned := loaded.Plan
+	state := applyeval.RuntimeState{
+		Sources: map[string]applyeval.SourceRuntimeState{
+			"source.project": {CommitSHA: "1111111111111111111111111111111111111111"},
+		},
+	}
+	ctx, err := applyeval.BuildEvalContext(planned, state, applyeval.WithBaseDir(extractDir))
+	require.NoError(t, err)
+
+	cfg, err := applyeval.EvalReadyWorker(ctx, nodeByAddress(t, planned, "worker.implement"), applyeval.WithPlan(planned))
+	require.NoError(t, err)
+	require.Len(t, cfg.SkillDirectories, 3)
+	assert.Equal(t, "config/skills", cfg.SkillDirectories[0])
+	assert.True(t, strings.HasPrefix(cfg.SkillDirectories[1], "external_skills/"))
+	assert.Equal(t, "/workspace/.agents/skills", cfg.SkillDirectories[2])
+	require.NotNil(t, cfg.QC)
+	require.Len(t, cfg.QC.SkillDirectories, 1)
+	assert.Equal(t, cfg.SkillDirectories[1], cfg.QC.SkillDirectories[0])
+}

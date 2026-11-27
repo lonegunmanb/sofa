@@ -633,3 +633,92 @@ func TestServerSecurityRejectsMissingAPITokenWhenNotDevLoopback(t *testing.T) {
 	assert.Equal(t, cli.ExitFailure, code)
 	assert.Contains(t, errBuf.String(), "api_token")
 }
+
+func TestApplyDirectoryBundlesExternalSkillDirsRelativeToSourceDir(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	wfDir := filepath.Join(workspace, "wf")
+	extDir := filepath.Join(workspace, "ext-skills")
+	require.NoError(t, os.MkdirAll(wfDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(extDir, "shared"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(extDir, "shared", "SKILL.md"), []byte("# Shared\n"), 0o644))
+
+	writeCLIFile(t, filepath.Join(wfDir, "main.sofa.hcl"), `
+source "project" {
+  url    = "https://github.com/example/sofa.git"
+  branch = "main"
+}
+sandbox "sb" {
+  runtime = "podman"
+  image   = "alpine:latest"
+}
+harness "local" {}
+worker "build" {
+  based_source      = source.project.branch
+  model             = "gpt-5"
+  system_prompt     = "Build"
+  skill_directories = ["../ext-skills"]
+}
+`)
+
+	var (
+		mu           sync.Mutex
+		gotPlanBytes []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs" {
+			require.NoError(t, r.ParseMultipartForm(32<<20))
+			f, _, err := r.FormFile("plan")
+			require.NoError(t, err)
+			defer func() { _ = f.Close() }()
+			planBytes, err := io.ReadAll(f)
+			require.NoError(t, err)
+			mu.Lock()
+			gotPlanBytes = planBytes
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"run_id":    "run-ext-1",
+				"namespace": "default",
+				"status":    "RUNNING",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	opts := cli.Options{WorkingDir: workspace}
+	var outBuf, errBuf bytes.Buffer
+	code := cli.Run(t.Context(), []string{"apply", "./wf", "--server", srv.URL, "--token", "t", "-d"}, strings.NewReader(""), &outBuf, &errBuf, opts)
+	require.Equal(t, cli.ExitSuccess, code, "stderr: %s", errBuf.String())
+
+	mu.Lock()
+	raw := gotPlanBytes
+	mu.Unlock()
+	require.NotEmpty(t, raw)
+
+	tmpPlan := filepath.Join(t.TempDir(), "uploaded.sofaplan")
+	require.NoError(t, os.WriteFile(tmpPlan, raw, 0o600))
+	loaded, err := plan.LoadArchive(tmpPlan, t.TempDir(), plan.LoadArchiveOptions{})
+	require.NoError(t, err)
+	var workerNode plan.NodeSpec
+	for _, n := range loaded.Plan.Nodes() {
+		if n.Address == "worker.build" {
+			workerNode = n
+		}
+	}
+	require.Equal(t, "worker.build", workerNode.Address)
+	var dirs []string
+	for it := workerNode.Config.GetAttr("skill_directories").ElementIterator(); it.Next(); {
+		_, elem := it.Element()
+		dirs = append(dirs, elem.AsString())
+	}
+	require.Len(t, dirs, 1)
+	assert.True(t, strings.HasPrefix(dirs[0], "external_skills/"))
+	extracted, err := os.ReadFile(filepath.Join(loaded.ExtractDir, filepath.FromSlash(dirs[0]), "shared", "SKILL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "# Shared\n", string(extracted))
+}

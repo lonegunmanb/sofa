@@ -40,7 +40,7 @@ flowchart TB
 
 1. **Plan 期（仅在 CLI 本地离线执行）**：
    - `sofa plan` 在本机直接调用 `golden`（`AsHclBlocks` → `InitConfig` → `RunPlan`）完成类型检查、Root 单例推导与无环校验。
-   - 输出自包含的 **`.sofaplan` 归档包**（内含冻结的不可变 Plan JSON + 模块静态资源快照如 `skills/`、子模块、随附工具脚本）。**服务端不提供远程建 Plan 接口**。
+   - 输出自包含的 **`.sofaplan` 归档包**（内含 `manifest.json`、冻结的不可变 `plan.json`、可选 `plugins.lock.json` 以及 `bundle/` 静态资源目录，布局为 `bundle/config/`、`bundle/modules/` 与客户端外部技能快照 `bundle/external_skills/<hash>/`）。打包与解包阶段确定性保留文件权限（目录与宿主机 `+x` 或 `#!` Shebang 开头的文件记为 `0755`，其余常规文件记为 `0644`，`plugins.lock.json` 为 `0644`），并将规范化权限纳入 `bundle_sha256` 校验。**服务端不提供远程建 Plan 接口**。
 2. **Apply 期（`RunActor` 非阻塞短调用驱动）**：
    - 服务端接收 `.sofaplan` 存入 `BlobStore` 并创建 `run_id`。
    - `RunActor` **不运行阻塞式的 `golden.RunApply`**；每次在收到节点完成事件或 Reminder 对账时，在毫秒级短调用内：
