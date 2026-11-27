@@ -766,7 +766,7 @@ type daprDeadNotifier struct {
 	clientProvider func() daprclient.Client
 }
 
-func (n *daprDeadNotifier) NotifyWorkerDead(ctx context.Context, ownerActorType, ownerActorID string, notice WorkerDeadNotification) error {
+func (n *daprDeadNotifier) NotifyWorkerDead(_ context.Context, ownerActorType, ownerActorID string, notice WorkerDeadNotification) error {
 	c := n.clientProvider()
 	if c == nil {
 		return errors.New("registry: dapr client unavailable for OnWorkerDead")
@@ -778,13 +778,29 @@ func (n *daprDeadNotifier) NotifyWorkerDead(ctx context.Context, ownerActorType,
 	if err != nil {
 		return err
 	}
-	_, err = c.InvokeActor(ctx, &daprclient.InvokeActorRequest{
-		ActorType: ownerActorType,
-		ActorID:   ownerActorID,
-		Method:    "OnWorkerDead",
-		Data:      data,
-	})
-	return err
+	// Dispatch asynchronously so ProcessRegistryActor's Dapr turn lock is released before
+	// OnWorkerDead calls back into ProcessRegistryActor.ClaimSlot (Dapr reentrancy is off).
+	go func(clientProvider func() daprclient.Client, actorType, actorID string, payload []byte) {
+		for attempt := 0; attempt < 5; attempt++ {
+			curClient := clientProvider()
+			if curClient == nil {
+				return
+			}
+			callCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_, callErr := curClient.InvokeActor(callCtx, &daprclient.InvokeActorRequest{
+				ActorType: actorType,
+				ActorID:   actorID,
+				Method:    "OnWorkerDead",
+				Data:      payload,
+			})
+			cancel()
+			if callErr == nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}(n.clientProvider, ownerActorType, ownerActorID, data)
+	return nil
 }
 
 type daprReminderScheduler struct {

@@ -272,6 +272,9 @@ func (a *MergeActor) EnqueueCandidate(ctx context.Context, req *EnqueueCandidate
 		state.TargetBranch = targetBranch
 		state.SharedTargetBranch = shared
 	}
+	if !shared && req.BranchPreRegistered {
+		state.RegisteredMergeBranches[branchRegKey(runID, mergeAddr, mergeEpoch)] = true
+	}
 	state.Queue = append(state.Queue, ticket)
 	if err := a.saveStateLocked(ctx, state); err != nil {
 		a.mu.Unlock()
@@ -279,7 +282,7 @@ func (a *MergeActor) EnqueueCandidate(ctx context.Context, req *EnqueueCandidate
 	}
 	a.mu.Unlock()
 
-	if err := a.tryDispatchNext(ctx); err != nil {
+	if err := a.tryDispatchNext(ctx, true); err != nil {
 		return nil, err
 	}
 
@@ -487,7 +490,7 @@ func (a *MergeActor) ReportCandidateResult(ctx context.Context, report *daemon.M
 	if notice != nil && notifier != nil {
 		_ = notifier.OnMergeCandidateResult(ctx, *notice)
 	}
-	_ = a.tryDispatchNext(ctx)
+	_ = a.tryDispatchNext(ctx, false)
 
 	return &ReportCandidateResultResp{
 		Accepted:        !report.Aborted,
@@ -593,7 +596,7 @@ func (a *MergeActor) CancelByRun(ctx context.Context, req *CancelByRunReq) (*Can
 			LeaseKey: releaseKey,
 		})
 	}
-	_ = a.tryDispatchNext(ctx)
+	_ = a.tryDispatchNext(ctx, true)
 
 	return &CancelByRunResp{
 		CancelledPending:  cancelledPending,
@@ -650,7 +653,7 @@ func (a *MergeActor) OnWorkerDead(ctx context.Context, notice *registry.WorkerDe
 	}
 	a.mu.Unlock()
 
-	_ = a.tryDispatchNext(ctx)
+	_ = a.tryDispatchNext(ctx, false)
 	return &OnWorkerDeadResp{
 		Handled:   true,
 		RequestID: ticket.RequestID,
@@ -680,7 +683,7 @@ func (a *MergeActor) ReminderCall(_ string, _ []byte, _ string, _ string) {
 	}
 	a.mu.Unlock()
 
-	_ = a.tryDispatchNext(ctx)
+	_ = a.tryDispatchNext(ctx, false)
 }
 
 // GetState returns a defensive snapshot of the MergeActor's queue, IN_FLIGHT ticket, and LatestTargetSHA.
@@ -711,7 +714,7 @@ func (a *MergeActor) GetState(ctx context.Context, _ *GetMergeStateReq) (*GetMer
 	}, nil
 }
 
-func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
+func (a *MergeActor) tryDispatchNext(ctx context.Context, asyncNotify bool) error {
 	a.mu.Lock()
 	if a.dispatching {
 		a.dispatchWake = true
@@ -767,7 +770,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 		var resolvedEnv map[string]string
 		if len(keys) > 0 {
 			if cfgResolver == nil {
-				a.failHeadTicket(ctx, ticket.RequestID, "merge: config resolver unavailable for required keys", notifier)
+				a.failHeadTicket(ctx, ticket.RequestID, "merge: config resolver unavailable for required keys", notifier, asyncNotify)
 				continue
 			}
 			resResp, resErr := cfgResolver.ResolveForNode(ctx, &config.ResolveForNodeReq{
@@ -777,7 +780,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 				Keys:         keys,
 			})
 			if resErr != nil {
-				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("resolve merge credentials: %v", resErr), notifier)
+				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("resolve merge credentials: %v", resErr), notifier, asyncNotify)
 				continue
 			}
 			if resResp == nil || len(resResp.MissingKeys) > 0 {
@@ -785,7 +788,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 				if resResp != nil {
 					missing = resResp.MissingKeys
 				}
-				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("missing required managed env/secret keys: %s", strings.Join(missing, ", ")), notifier)
+				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("missing required managed env/secret keys: %s", strings.Join(missing, ", ")), notifier, asyncNotify)
 				continue
 			}
 			resolvedEnv = maps.Clone(resResp.Values)
@@ -806,7 +809,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 				BaseSHA:  pinBase,
 				Kind:     git.KindMergeBranch,
 			}); regErr != nil {
-				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("register merge branch %q: %v", ticket.TargetBranch, regErr), notifier)
+				a.failHeadTicket(ctx, ticket.RequestID, fmt.Sprintf("register merge branch %q: %v", ticket.TargetBranch, regErr), notifier, asyncNotify)
 				continue
 			}
 
@@ -828,7 +831,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 
 		// Step 3: Claim least-load worker slot outside actor mutex.
 		if slotMgr == nil {
-			a.failHeadTicket(ctx, ticket.RequestID, "merge: slot manager unavailable", notifier)
+			a.failHeadTicket(ctx, ticket.RequestID, "merge: slot manager unavailable", notifier, asyncNotify)
 			continue
 		}
 		nextAttempt := ticket.Attempt + 1
@@ -914,7 +917,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 			}
 			a.mu.Unlock()
 			if notifier != nil {
-				_ = notifier.OnMergeCandidateResult(ctx, MergeCandidateNotification{
+				deliverMergeResultNotification(ctx, notifier, MergeCandidateNotification{
 					RequestID:          committed.RequestID,
 					RunID:              committed.RunID,
 					MergeNodeAddr:      committed.MergeNodeAddr,
@@ -926,7 +929,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 					SharedTargetBranch: committed.SharedTargetBranch,
 					ErrorMessage:       "merge: worker dispatcher unavailable",
 					OccurredAt:         a.clock(),
-				})
+				}, asyncNotify)
 			}
 			continue
 		}
@@ -984,7 +987,7 @@ func (a *MergeActor) tryDispatchNext(ctx context.Context) error {
 	}
 }
 
-func (a *MergeActor) failHeadTicket(ctx context.Context, expectedReqID, errMsg string, notifier RunMergeNotifier) {
+func (a *MergeActor) failHeadTicket(ctx context.Context, expectedReqID, errMsg string, notifier RunMergeNotifier, asyncNotify bool) {
 	a.mu.Lock()
 	state, err := a.loadStateLocked(ctx)
 	if err != nil {
@@ -1007,7 +1010,7 @@ func (a *MergeActor) failHeadTicket(ctx context.Context, expectedReqID, errMsg s
 	a.mu.Unlock()
 
 	if notifier != nil {
-		_ = notifier.OnMergeCandidateResult(ctx, MergeCandidateNotification{
+		deliverMergeResultNotification(ctx, notifier, MergeCandidateNotification{
 			RequestID:          failed.RequestID,
 			RunID:              failed.RunID,
 			MergeNodeAddr:      failed.MergeNodeAddr,
@@ -1023,8 +1026,26 @@ func (a *MergeActor) failHeadTicket(ctx context.Context, expectedReqID, errMsg s
 			},
 			ErrorMessage: errMsg,
 			OccurredAt:   now,
-		})
+		}, asyncNotify)
 	}
+}
+
+func deliverMergeResultNotification(ctx context.Context, notifier RunMergeNotifier, notice MergeCandidateNotification, asyncNotify bool) {
+	if notifier == nil {
+		return
+	}
+	if asyncNotify {
+		if _, isDapr := notifier.(*daprRunMergeNotifier); isDapr {
+			// Dispatch outside EnqueueCandidate's call stack so RunActor's Dapr turn lock releases first.
+			go func(n RunMergeNotifier, msg MergeCandidateNotification) {
+				callCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				_ = n.OnMergeCandidateResult(callCtx, msg)
+			}(notifier, notice)
+			return
+		}
+	}
+	_ = notifier.OnMergeCandidateResult(ctx, notice)
 }
 
 func (a *MergeActor) snapshotTicket(ctx context.Context, requestID string) (CandidateTicket, bool) {

@@ -182,29 +182,30 @@ type ReminderScheduler interface {
 
 // EnqueueCandidateReq submits a candidate branch for serial integration onto the target branch.
 type EnqueueCandidateReq struct {
-	RunID           string                        `json:"run_id"`
-	MergeNodeAddr   string                        `json:"merge_node_addr"`
-	MergeEpoch      uint64                        `json:"merge_epoch,omitempty"`
-	SourceNodeAddr  string                        `json:"source_node_addr"`
-	SourceEpoch     uint64                        `json:"source_epoch"`
-	RepoURL         string                        `json:"repo_url"`
-	BasedSource     string                        `json:"based_source,omitempty"`
-	BaseSHA         string                        `json:"base_sha,omitempty"`
-	TargetBranch    *string                       `json:"target_branch,omitempty"`
-	CandidateBranch string                        `json:"candidate_branch"`
-	Namespace       string                        `json:"namespace,omitempty"`
-	RunOverrides    map[string]string             `json:"run_overrides,omitempty"`
-	RequiredEnvKeys []string                      `json:"required_env_keys,omitempty"`
-	TokenRef        *string                       `json:"token_ref,omitempty"`
-	SSHKeyRef       *string                       `json:"ssh_key_ref,omitempty"`
-	Auth            git.AuthConfig                `json:"auth,omitempty"`
-	RequiredArch    string                        `json:"required_arch,omitempty"`
-	Sandbox         sandboxspec.SandboxConfig     `json:"sandbox"`
-	Gatekeepers     []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
-	BundleDir       string                        `json:"bundle_dir,omitempty"`
-	ImportsDir      string                        `json:"imports_dir,omitempty"`
-	HostOS          string                        `json:"host_os,omitempty"`
-	TempRoot        string                        `json:"temp_root,omitempty"`
+	RunID               string                        `json:"run_id"`
+	MergeNodeAddr       string                        `json:"merge_node_addr"`
+	MergeEpoch          uint64                        `json:"merge_epoch,omitempty"`
+	SourceNodeAddr      string                        `json:"source_node_addr"`
+	SourceEpoch         uint64                        `json:"source_epoch"`
+	RepoURL             string                        `json:"repo_url"`
+	BasedSource         string                        `json:"based_source,omitempty"`
+	BaseSHA             string                        `json:"base_sha,omitempty"`
+	TargetBranch        *string                       `json:"target_branch,omitempty"`
+	BranchPreRegistered bool                          `json:"branch_pre_registered,omitempty"`
+	CandidateBranch     string                        `json:"candidate_branch"`
+	Namespace           string                        `json:"namespace,omitempty"`
+	RunOverrides        map[string]string             `json:"run_overrides,omitempty"`
+	RequiredEnvKeys     []string                      `json:"required_env_keys,omitempty"`
+	TokenRef            *string                       `json:"token_ref,omitempty"`
+	SSHKeyRef           *string                       `json:"ssh_key_ref,omitempty"`
+	Auth                git.AuthConfig                `json:"auth,omitempty"`
+	RequiredArch        string                        `json:"required_arch,omitempty"`
+	Sandbox             sandboxspec.SandboxConfig     `json:"sandbox"`
+	Gatekeepers         []workerspec.GatekeeperConfig `json:"gatekeepers,omitempty"`
+	BundleDir           string                        `json:"bundle_dir,omitempty"`
+	ImportsDir          string                        `json:"imports_dir,omitempty"`
+	HostOS              string                        `json:"host_os,omitempty"`
+	TempRoot            string                        `json:"temp_root,omitempty"`
 }
 
 // EnqueueCandidateResp confirms queue acceptance and reports deduplication status.

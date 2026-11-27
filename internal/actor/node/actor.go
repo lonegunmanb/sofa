@@ -273,7 +273,7 @@ func (a *NodeActor) StartOrResume(ctx context.Context, req *StartOrResumeReq) (*
 	}
 	a.mu.Unlock()
 
-	return a.dispatchCurrentEpoch(ctx, targetEpoch)
+	return a.dispatchCurrentEpoch(ctx, targetEpoch, false)
 }
 
 // ReminderCall handles persistent QUEUED_SLOT retry ticks with explicit Set+Save persistence.
@@ -299,7 +299,7 @@ func (a *NodeActor) ReminderCall(_ string, _ []byte, _ string, _ string) {
 	targetEpoch := state.CurrentEpoch
 	a.mu.Unlock()
 
-	_, _ = a.dispatchCurrentEpoch(ctx, targetEpoch)
+	_, _ = a.dispatchCurrentEpoch(ctx, targetEpoch, true)
 }
 
 // OnWorkerDead handles ProcessRegistryActor DEAD notifications, advancing epoch and taking over on a healthy worker.
@@ -355,7 +355,7 @@ func (a *NodeActor) OnWorkerDead(ctx context.Context, notice *registry.WorkerDea
 		})
 	}
 
-	dispResp, dispErr := a.dispatchCurrentEpoch(ctx, newEpoch)
+	dispResp, dispErr := a.dispatchCurrentEpoch(ctx, newEpoch, true)
 	if dispErr != nil {
 		return &OnWorkerDeadResp{
 			Handled: true,
@@ -486,9 +486,8 @@ func (a *NodeActor) PauseNode(ctx context.Context, req *PauseNodeReq) (*PauseNod
 			LeaseKey: releaseKey,
 		})
 	}
-	if notifyEvent != nil && notifier != nil {
-		_ = notifier.NotifyNodeEvent(ctx, *notifyEvent)
-	}
+	_ = notifyEvent
+	_ = notifier
 
 	return resp, nil
 }
@@ -600,15 +599,9 @@ func (a *NodeActor) AdvanceForRework(ctx context.Context, req *AdvanceForReworkR
 			LeaseKey: releaseKey,
 		})
 	}
-	if notifier != nil {
-		_ = notifier.NotifyNodeEvent(ctx, NodeEventNotification{
-			RunID:      runID,
-			NodeAddr:   nodeAddr,
-			Epoch:      resp.Epoch,
-			Status:     resp.Status,
-			OccurredAt: now,
-		})
-	}
+	_ = notifier
+	_ = runID
+	_ = nodeAddr
 
 	return resp, nil
 }
@@ -708,15 +701,9 @@ func (a *NodeActor) ResetForRerun(ctx context.Context, req *ResetForRerunReq) (*
 			LeaseKey: releaseKey,
 		})
 	}
-	if notifier != nil {
-		_ = notifier.NotifyNodeEvent(ctx, NodeEventNotification{
-			RunID:      runID,
-			NodeAddr:   nodeAddr,
-			Epoch:      resp.Epoch,
-			Status:     resp.Status,
-			OccurredAt: now,
-		})
-	}
+	_ = notifier
+	_ = runID
+	_ = nodeAddr
 
 	return resp, nil
 }
@@ -1026,7 +1013,7 @@ func (a *NodeActor) SubmitDecision(ctx context.Context, req *SubmitDecisionReq) 
 		_ = notifier.NotifyNodeEvent(ctx, notify)
 	}
 
-	dispResp, dispErr := a.dispatchCurrentEpoch(ctx, newEpoch)
+	dispResp, dispErr := a.dispatchCurrentEpoch(ctx, newEpoch, true)
 	if dispErr != nil {
 		return &SubmitDecisionResp{
 			Accepted:    true,
@@ -1539,7 +1526,7 @@ func (a *NodeActor) GetApproval(ctx context.Context, _ *GetApprovalReq) (*GetApp
 	return &GetApprovalResp{Approval: cloneApprovalRecord(state.Approval)}, nil
 }
 
-func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint64) (*StartOrResumeResp, error) {
+func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint64, notifyRun bool) (*StartOrResumeResp, error) {
 	a.mu.Lock()
 	state, err := a.loadStateLocked(ctx)
 	if err != nil {
@@ -1568,6 +1555,9 @@ func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint
 	dispatcher := a.workerDispatcher
 	remSched := a.reminderScheduler
 	notifier := a.runNotifier
+	if !notifyRun {
+		notifier = nil
+	}
 	retryInterval := a.slotRetryInterval
 	remName := a.reminderName
 	a.mu.Unlock()
@@ -1577,7 +1567,7 @@ func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint
 	var resolvedEnv map[string]string
 	if len(keys) > 0 {
 		if cfgResolver == nil {
-			return a.failDispatch(ctx, expectedEpoch, "node: config resolver unavailable for required keys")
+			return a.failDispatch(ctx, expectedEpoch, notifyRun, "node: config resolver unavailable for required keys")
 		}
 		resResp, resErr := cfgResolver.ResolveForNode(ctx, &config.ResolveForNodeReq{
 			RunID:        runID,
@@ -1586,21 +1576,21 @@ func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint
 			Keys:         keys,
 		})
 		if resErr != nil {
-			return a.failDispatch(ctx, expectedEpoch, fmt.Sprintf("resolve node credentials: %v", resErr))
+			return a.failDispatch(ctx, expectedEpoch, notifyRun, fmt.Sprintf("resolve node credentials: %v", resErr))
 		}
 		if resResp == nil || len(resResp.MissingKeys) > 0 {
 			missing := []string(nil)
 			if resResp != nil {
 				missing = resResp.MissingKeys
 			}
-			return a.failDispatch(ctx, expectedEpoch, fmt.Sprintf("missing required managed env/secret keys: %s", strings.Join(missing, ", ")))
+			return a.failDispatch(ctx, expectedEpoch, notifyRun, fmt.Sprintf("missing required managed env/secret keys: %s", strings.Join(missing, ", ")))
 		}
 		resolvedEnv = maps.Clone(resResp.Values)
 	}
 
 	// Step 2: Claim least-load worker slot outside actor mutex.
 	if slotMgr == nil {
-		return a.failDispatch(ctx, expectedEpoch, "node: slot manager unavailable")
+		return a.failDispatch(ctx, expectedEpoch, notifyRun, "node: slot manager unavailable")
 	}
 	leaseKey := fmt.Sprintf("%s/%s/e%d", runID, nodeAddr, expectedEpoch)
 	claimResp, claimErr := slotMgr.ClaimSlot(ctx, &registry.ClaimSlotReq{
@@ -1653,7 +1643,7 @@ func (a *NodeActor) dispatchCurrentEpoch(ctx context.Context, expectedEpoch uint
 
 	if dispatcher == nil {
 		_, _ = slotMgr.ReleaseSlot(ctx, &registry.ReleaseSlotReq{LeaseID: claimResp.LeaseID, LeaseKey: claimResp.LeaseKey})
-		return a.failDispatch(ctx, expectedEpoch, "node: worker dispatcher unavailable")
+		return a.failDispatch(ctx, expectedEpoch, notifyRun, "node: worker dispatcher unavailable")
 	}
 
 	startReq := buildDaemonStartNodeRequest(spec, expectedEpoch, claimResp, resolvedEnv)
@@ -1746,7 +1736,7 @@ func (a *NodeActor) enterQueuedSlot(
 	}, nil
 }
 
-func (a *NodeActor) failDispatch(ctx context.Context, expectedEpoch uint64, reason string) (*StartOrResumeResp, error) {
+func (a *NodeActor) failDispatch(ctx context.Context, expectedEpoch uint64, notifyRun bool, reason string) (*StartOrResumeResp, error) {
 	a.mu.Lock()
 	state, err := a.loadStateLocked(ctx)
 	if err != nil {
@@ -1773,7 +1763,7 @@ func (a *NodeActor) failDispatch(ctx context.Context, expectedEpoch uint64, reas
 	runID, nodeAddr := state.RunID, state.NodeAddr
 	a.mu.Unlock()
 
-	if notifier != nil {
+	if notifyRun && notifier != nil {
 		_ = notifier.NotifyNodeEvent(ctx, NodeEventNotification{
 			RunID:        runID,
 			NodeAddr:     nodeAddr,
