@@ -1042,6 +1042,80 @@ func TestClassifyErrorAllCategories(t *testing.T) {
 	}
 }
 
+func TestRunTurnSuppliesFarFutureDeadlineToBypassSDK60sDefault(t *testing.T) {
+	t.Parallel()
+
+	t.Run("attaches far-future deadline when incoming RunTurn stream has no deadline", func(t *testing.T) {
+		t.Parallel()
+
+		var gotHasDeadline bool
+		var gotRemaining time.Duration
+		sess := &fakeSDKSession{
+			id: "s-deadline-unbounded",
+			onSend: func(ctx context.Context, _ *sdk.SessionConfig, _ func(sdk.SessionEvent), _ sdk.MessageOptions) (*sdk.SessionEvent, error) {
+				dl, ok := ctx.Deadline()
+				gotHasDeadline = ok
+				if ok {
+					gotRemaining = time.Until(dl)
+				}
+				return &sdk.SessionEvent{Data: &sdk.AssistantMessageData{MessageID: "m1", Content: "done"}}, nil
+			},
+		}
+		fc := &fakeSDKClient{session: sess}
+		srv := New(WithClientFactory(func(string, []string) (sdkClient, error) { return fc, nil }))
+		cli := startTestGRPCServer(t, srv)
+
+		openResp, err := cli.OpenSession(context.Background(), &harnessv1.OpenSessionRequest{
+			SessionId: "s-deadline-unbounded",
+			Model:     "gpt-5",
+		})
+		require.NoError(t, err)
+		require.Nil(t, openResp.GetError())
+
+		stream, err := cli.RunTurn(context.Background())
+		require.NoError(t, err)
+		require.NoError(t, stream.Send(&harnessv1.HostTurnFrame{
+			Payload: &harnessv1.HostTurnFrame_StartTurn{
+				StartTurn: &harnessv1.StartTurnRequest{
+					SessionId: "s-deadline-unbounded",
+					TurnId:    "turn-1",
+					Prompt:    "long slice task",
+				},
+			},
+		}))
+
+		var gotResult *harnessv1.TurnResult
+		for {
+			frame, recvErr := stream.Recv()
+			if errors.Is(recvErr, io.EOF) {
+				break
+			}
+			require.NoError(t, recvErr)
+			if res := frame.GetTurnResult(); res != nil {
+				gotResult = res
+			}
+		}
+		require.NotNil(t, gotResult)
+		require.Nil(t, gotResult.GetError())
+		assert.True(t, gotHasDeadline, "SendAndWait context MUST carry a deadline so copilot-sdk/go does not apply its 60s default timeout")
+		assert.Greater(t, gotRemaining, 24*time.Hour, "fallback deadline must be far in the future (>=24h)")
+	})
+
+	t.Run("preserves explicit caller deadline when already set", func(t *testing.T) {
+		t.Parallel()
+
+		explicitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		wantDL, _ := explicitCtx.Deadline()
+
+		wrappedCtx, wrappedCancel := ensureTurnDeadline(explicitCtx)
+		defer wrappedCancel()
+		gotDL, ok := wrappedCtx.Deadline()
+		require.True(t, ok)
+		assert.Equal(t, wantDL, gotDL)
+	})
+}
+
 type fakeSDKClient struct {
 	mu             sync.Mutex
 	createConfigs  []*sdk.SessionConfig

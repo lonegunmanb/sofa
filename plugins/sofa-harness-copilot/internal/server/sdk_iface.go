@@ -5,11 +5,29 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sync"
+	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 	harnessv1 "github.com/lonegunmanb/sofa/pkg/harnessplugin/v1"
 )
+
+const unboundedTurnDeadline = 365 * 24 * time.Hour
+
+// ensureTurnDeadline attaches a far-future safety deadline when ctx carries no
+// explicit deadline so github.com/github/copilot-sdk/go's Session.SendAndWait
+// never falls back to its hardcoded 60-second default timeout. Turn-level stall
+// detection and cancellation remain owned by the sofa host (StallWatchdog,
+// AbortTurn, and gRPC stream teardown).
+func ensureTurnDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, unboundedTurnDeadline)
+}
 
 type sdkClientFactory func(cliPath string, env []string) (sdkClient, error)
 
@@ -87,6 +105,9 @@ func (s *officialSession) On(handler sdk.SessionEventHandler) func() {
 }
 
 func (s *officialSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	waitCtx, cancelWait := ensureTurnDeadline(ctx)
+	defer cancelWait()
+
 	var (
 		mu           sync.Mutex
 		sessionError *sdk.SessionErrorData
@@ -103,7 +124,7 @@ func (s *officialSession) SendAndWait(ctx context.Context, options sdk.MessageOp
 	})
 	defer unsubscribe()
 
-	event, err := s.sdk.SendAndWait(ctx, options)
+	event, err := s.sdk.SendAndWait(waitCtx, options)
 	if err == nil {
 		return event, nil
 	}

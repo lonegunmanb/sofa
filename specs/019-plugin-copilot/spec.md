@@ -46,6 +46,7 @@
 1. **Given** an active `RunTurn` where the model invokes `bash` (built-in) and `sofa_checkpoint` (host tool), **When** SDK hooks and tool handlers run, **Then** `bash` emits `PreToolUseRequest` and `PostToolUseRequest(succeeded=false)`, while `sofa_checkpoint` emits only `InvokeHostToolRequest` and never emits `PreToolUseRequest` or `PostToolUseRequest`.
 2. **Given** a blocked `SendAndWait` in `RunTurn`, **When** `AbortTurn` is invoked concurrently, **Then** `session.Abort` runs immediately, the active turn context cancels, and `RunTurn` exits cleanly with a `TurnResult` error.
 3. **Given** `sdk.SessionErrorData` or HTTP/transport errors (`429`/`rate_limit`, `401`/`authentication`, `403`/`authorization`, `quota`, `context_limit`, `Session not found`, `5xx`/network), **When** `classifyError` runs, **Then** it produces the exact matching `harnessv1.ErrorCategory` and `HttpStatusCode`.
+4. **Given** an incoming `RunTurn` stream context with no gRPC deadline (`_, ok := ctx.Deadline(); !ok`), **When** `RunTurn` / `officialSession.SendAndWait` invokes `copilot-sdk/go` `Session.SendAndWait`, **Then** it attaches a far-future safety deadline (`>= 24h`) so `copilot-sdk/go` never falls back to its hardcoded `60s` default timeout while still honoring explicit caller deadlines and immediate cancellation via `AbortTurn` or stream teardown.
 
 ---
 
@@ -61,7 +62,7 @@
 - **FR-001**: `plugins/sofa-harness-copilot/go.mod` MUST declare `module github.com/lonegunmanb/sofa-harness-copilot` with `replace github.com/lonegunmanb/sofa => ../..`; root `d:\project\sofa\go.mod` MUST remain completely free of `github.com/github/copilot-sdk/go`.
 - **FR-002**: `plugins/sofa-harness-copilot/internal/server/sdk_iface.go` MUST define thin `sdkClient` / `sdkSession` interfaces and the `copilot-sdk/go v1.0.19` adapter (`officialClient` / `officialSession`).
 - **FR-003**: `plugins/sofa-harness-copilot/internal/server/errors.go` MUST map `sdk.SessionErrorData`, `sdk.RPCError`, HTTP status codes, and error substrings into `harnessv1.ErrorDetail`.
-- **FR-004**: `plugins/sofa-harness-copilot/internal/server/server.go` MUST implement all 7 `harnessv1.AgentHarnessServer` RPCs with `<execDir>/bin/copilot` -> `options["cli_path"]` -> `LookPath("copilot")` discovery, `StdioConnection.Env`-only `HarnessEnv` injection, non-reentrant `hostToolNames` hook guard, thread-safe `stream.Send`, and non-blocking `AbortTurn`.
+- **FR-004**: `plugins/sofa-harness-copilot/internal/server/server.go` MUST implement all 7 `harnessv1.AgentHarnessServer` RPCs with `<execDir>/bin/copilot` -> `options["cli_path"]` -> `LookPath("copilot")` discovery, `StdioConnection.Env`-only `HarnessEnv` injection, non-reentrant `hostToolNames` hook guard, thread-safe `stream.Send`, non-blocking `AbortTurn`, and unbounded-turn deadline protection (`ensureTurnDeadline`) bypassing `copilot-sdk/go`'s `60s` no-deadline fallback.
 - **FR-005**: `plugins/sofa-harness-copilot/scripts/build-bundle.go` MUST produce `<out>/sofa-harness-copilot/{sofa-harness-copilot, bin/copilot}`.
 - **FR-006**: `internal/worker/runner/copilot_plugin_integration_test.go` (`//go:build integration`) MUST exercise the full `WorkerRunner.Run` loop inside Podman using `013` local plugin discovery (`harness "copilot"`) and real `copilot-sdk/go` stdio JSON-RPC over a stub `bin/copilot`.
 

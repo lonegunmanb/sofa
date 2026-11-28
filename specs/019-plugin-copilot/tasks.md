@@ -28,3 +28,9 @@
 ## Phase 5: Final Isolation & Verification Gate
 
 - [X] T012 Verify `git diff go.mod` in `d:\project\sofa` is empty, run `gofmt -l .`, `go vet ./...`, `go test ./... -count=1` in both `plugins/sofa-harness-copilot` and `d:\project\sofa`, and leave working tree uncommitted for parent review.
+
+## Phase 6: Unbounded Turn Deadline Fix (`copilot-sdk/go` 60s Default Timeout Bypass)
+
+- [X] T013 [Red] Add `TestRunTurnSuppliesFarFutureDeadlineToBypassSDK60sDefault` in `plugins/sofa-harness-copilot/internal/server/server_test.go` verifying that `RunTurn` without an incoming stream deadline passes a context with `Deadline() > 24h` to `sdkSession.SendAndWait` while preserving explicit caller deadlines and immediate `AbortTurn` cancellation; confirm test fails before implementation.
+- [X] T014 [Green] Implement `ensureTurnDeadline` in `plugins/sofa-harness-copilot/internal/server/sdk_iface.go` and wire it in both `Server.RunTurn` and `officialSession.SendAndWait`.
+- [X] T015 Verify `gofmt -l .`, `go vet ./...`, and `go test ./... -count=1` in `plugins/sofa-harness-copilot` and root `d:\project\sofa`, and reinstall local Linux `sofa-harness-copilot` bundle.

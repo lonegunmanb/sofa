@@ -568,7 +568,9 @@ func (s *Server) RunTurn(stream harnessv1.AgentHarness_RunTurnServer) error {
 		}
 	})
 
-	finalEv, sendErr := sdkSess.SendAndWait(turn.ctx, sdk.MessageOptions{Prompt: startReq.GetPrompt()})
+	waitCtx, cancelWait := ensureTurnDeadline(turn.ctx)
+	finalEv, sendErr := sdkSess.SendAndWait(waitCtx, sdk.MessageOptions{Prompt: startReq.GetPrompt()})
+	cancelWait()
 	unsubscribe()
 
 	if sendErr != nil {
