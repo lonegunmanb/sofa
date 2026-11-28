@@ -10,7 +10,8 @@ This repository implements **sofa (SOftware FActory)** (`github.com/lonegunmanb/
 4. **Pre-Designed Slice Blueprints**:
    - **Stage 1 (Completed)**: `docs/stage1/README.md`, `docs/stage1/001-*.md` through `009-*.md`, and `004b-harness-and-sandbox-bridge.md`.
    - **Stage 2 (Completed)**: `docs/stage2/README.md` and `docs/stage2/010-*.md` through `020-*.md`.
-   - **Stage 3 (Detailed Blueprints)**: `docs/stage3/README.md` and `docs/stage3/021-*.md` through `032-*.md` (MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 3 slice).
+   - **Stage 3 & Post-Stage-3 Refinements (Completed)**: `docs/stage3/README.md`, `docs/stage3/021-*.md` through `032-*.md`, and `specs/033-*` through `specs/037-*`.
+   - **Stage 4 (Detailed Blueprints)**: `docs/stage4/README.md` and `docs/stage4/038-*.md` through `041-*.md` (MUST be read and followed verbatim before running `/speckit-specify` or `/speckit-plan` on any Stage 4 slice).
 5. **Active Feature Contracts**: `specs/<###-feature>/` (`spec.md`, `plan.md`, `data-model.md`, `contracts/`, `tasks.md`).
 
 ## 2. Pre-Task Investigation & Anti-Monolith Sizing (NON-NEGOTIABLE)

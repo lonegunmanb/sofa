@@ -26,8 +26,9 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# env & local variable files (may contain API keys)
 .env
+*.sofavars
 
 # Frontend (Vue / Vite)
 node_modules/

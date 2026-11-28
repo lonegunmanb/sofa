@@ -1,46 +1,59 @@
 source "repo" {
   url       = var.repo_url
   branch    = var.base_branch
-  token_ref = "GITHUB_TOKEN"
+  token_ref = var.git_token_ref
 }
 
 sandbox "go_dev" {
   runtime = "podman"
-  image   = var.sandbox_image
+  image   = var.work_sandbox_image
 }
 
 sandbox "qc_audit" {
   runtime = "podman"
-  image   = var.sandbox_image
+  image   = var.qc_sandbox_image
 }
 
 harness "copilot" {
-  env_refs = {
-    GITHUB_TOKEN = "COPILOT_GITHUB_TOKEN"
-  }
+  env_refs = var.copilot_github_token_ref != null ? {
+    GITHUB_TOKEN = var.copilot_github_token_ref
+  } : {}
 }
 
-harness "antigravity" {
-  env_refs = {
-    GEMINI_API_KEY = "GEMINI_API_KEY"
-  }
+model_provider "work" {
+  type        = var.work_provider_type
+  endpoint    = var.work_api_url
+  wire_api    = var.work_wire_api
+  api_key     = var.work_api_key
+  api_key_ref = var.work_api_key_ref
+}
+
+model_provider "qc" {
+  type        = var.qc_provider_type
+  endpoint    = var.qc_api_url
+  wire_api    = var.qc_wire_api
+  api_key     = var.qc_api_key
+  api_key_ref = var.qc_api_key_ref
 }
 
 worker "implement_slice" {
-  based_source   = source.repo.branch
-  sandbox        = sandbox.go_dev
-  harness        = harness.copilot
-  model          = var.work_model
-  writable_paths = var.writable_paths
-  human_approval = var.human_approval
+  based_source     = source.repo.branch
+  sandbox          = sandbox.go_dev
+  harness          = harness.copilot
+  model_provider   = model_provider.work
+  model            = var.work_model
+  reasoning_effort = var.work_reasoning_effort
+  writable_paths   = var.writable_paths
+  human_approval   = var.human_approval
 
   system_prompt = <<-EOT
-    You are implementing a sofa engineering slice inside a sandboxed container.
-    Follow AGENTS.md and .specify/memory/constitution.md strictly:
-    - Author or update Spec Kit artifacts before modifying code, and follow Red -> Green -> Refactor TDD.
-    - Reuse existing golden and internal package capabilities without duplicating logic.
-    - Ensure gofmt -l . is empty, go vet ./... passes, and go test ./... -count=1 passes before completing work.
-    - Write a concise change summary to ${artifact("summary").path}.
+    Follow AGENTS.md and .specify/memory/constitution.md strictly, and write a concise change summary to ${artifact("summary").path}.
+
+    # TODO(041): Remove once WorkerRunner auto-injects runtime/protocol constraints into system_prompt.
+    Runtime & Protocol Constraints:
+    - Working directory is /workspace with read-only /workspace/.git. NEVER run git add, git commit, git push, or git checkout (the host manages Git snapshots and branches automatically).
+    - Only modify paths matching writable_paths: ${join(", ", var.writable_paths)}.
+    - Use sofa_checkpoint to record progress diaries at milestones, and MUST call sofa_complete_work once verification passes and ${artifact("summary").path} is written.
   EOT
 
   prompt = var.slice_prompt
@@ -54,11 +67,12 @@ worker "implement_slice" {
   }
 
   qc {
-    sandbox        = sandbox.qc_audit
-    harness        = harness.antigravity
-    model_provider = null
-    model          = var.qc_model
-    max_qc_rounds  = 3
+    sandbox          = sandbox.qc_audit
+    harness          = harness.copilot
+    model_provider   = model_provider.qc
+    model            = var.qc_model
+    reasoning_effort = var.qc_reasoning_effort
+    max_qc_rounds    = 3
 
     gatekeeper "go_quality" {
       command                = ["sh", "-c", "unformatted=$(gofmt -l .); if [ -n \"$unformatted\" ]; then echo \"unformatted files:\"; echo \"$unformatted\"; exit 1; fi && go vet ./... && go test ./... -count=1"]
@@ -69,9 +83,9 @@ worker "implement_slice" {
     }
 
     criteria = {
-      spec_and_contracts = "Verify every implementation change matches AGENTS.md, the feature spec, and frozen contracts line by line."
+      spec_and_contracts = "Inspect ${artifact("summary").path} and git status/diff first; verify every change matches AGENTS.md, the active feature spec under specs/, and frozen contracts line by line."
       tdd_and_tests      = "Verify tests cover every new behavior and edge case without skipped assertions or mocked-away invariants."
-      code_quality_scope = "Verify clean, minimal, idiomatic Go code with no duplicated logic, clean formatting, and accurate summary.md artifact."
+      code_quality_scope = "Verify clean, minimal, idiomatic Go code with no out-of-scope edits, clean formatting, and an accurate ${artifact("summary").path} artifact."
     }
   }
 }
