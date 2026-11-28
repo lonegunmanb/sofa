@@ -7,7 +7,7 @@
 2. 自动兼容 **容器沙箱（`podman`/`docker`/`nerdctl`/`kirk`）** 与 **宿主机模式（`runtime = "host"`）** 两种路径布局。
 3. 清理 `examples/copilot-agy-self-host/main.sofa.hcl` 中带 `# TODO(041)` 的临时手写运行时提示词。
 
-**前置依赖**：`040`。
+**前置依赖**：Stage 3 + `037`（本分片可先于 `038`–`040` 独立落地：`prompt_contract.go` 通过判断 `sandboxRuntime == "host"` 字符串分支提前兼容宿主机路径模式；在 `038` 尚未落地前，`host` 分支通过直接单测 `buildWorkRuntimeContractPrompt` / `buildQCRuntimeContractPrompt` 纯函数验证，不经过 `SandboxConfig.Validate()`）。
 
 ---
 
@@ -45,6 +45,6 @@
 
 - `runner_test.go`：
   - 容器模式下 Work `SessionConfig.SystemPrompt` 包含用户 `system_prompt` + `/workspace`、禁 `git commit`、`writable_paths`、`/.sofa/artifacts/...`、`/.sofa/imports/...` 及 `sofa_complete_work`（以及自定义终止工具场景下的自定义工具名）；
-  - `runtime = "host"` 模式下 Work 与 QC `SessionConfig.SystemPrompt` 准确切换为 `.sofa/artifacts/...` / `.sofa/imports/...` 与宿主机工作目录；
+  - `runtime == "host"` 分支下，纯函数单测验证 Work 与 QC 系统提示词准确切换为 `.sofa/artifacts/...` / `.sofa/imports/...` 与宿主机工作目录（在 `038` 落地前直接测试 `buildWorkRuntimeContractPrompt` / `buildQCRuntimeContractPrompt`，无需构造 `Runtime: "host"` 触发 `SandboxConfig.Validate()`）；
   - QC `SessionConfig.SystemPrompt` 自动包含 Worker 已声明的 `artifact` 路径清单与 `sofa_qc_submit_verdict` 规则。
 - `examples_test.go`：验证精简后的 `examples/copilot-agy-self-host/main.sofa.hcl` 编译与 Plan 往返测试全绿。
