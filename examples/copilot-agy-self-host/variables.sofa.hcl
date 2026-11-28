@@ -31,6 +31,18 @@ variable "copilot_github_token_ref" {
   default     = null
 }
 
+variable "copilot_proxy_ref" {
+  type        = string
+  description = "Optional managed env reference name for HTTP/HTTPS proxy URL injected into Copilot CLI subprocesses."
+  default     = null
+}
+
+variable "go_mod_cache_dir" {
+  type        = string
+  description = "Optional host GOMODCACHE directory mounted read-only at /go/pkg/mod inside Go sandboxes."
+  default     = null
+}
+
 variable "work_sandbox_image" {
   type        = string
   description = "Container image used by the Copilot implementation worker sandbox."

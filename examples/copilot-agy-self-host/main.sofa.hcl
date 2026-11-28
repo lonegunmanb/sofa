@@ -7,17 +7,43 @@ source "repo" {
 sandbox "go_dev" {
   runtime = "podman"
   image   = var.work_sandbox_image
+
+  dynamic "mount" {
+    for_each = var.go_mod_cache_dir != null ? [var.go_mod_cache_dir] : []
+    content {
+      source    = mount.value
+      target    = "/go/pkg/mod"
+      read_only = true
+    }
+  }
 }
 
 sandbox "qc_audit" {
   runtime = "podman"
   image   = var.qc_sandbox_image
+
+  dynamic "mount" {
+    for_each = var.go_mod_cache_dir != null ? [var.go_mod_cache_dir] : []
+    content {
+      source    = mount.value
+      target    = "/go/pkg/mod"
+      read_only = true
+    }
+  }
 }
 
 harness "copilot" {
-  env_refs = var.copilot_github_token_ref != null ? {
-    GITHUB_TOKEN = var.copilot_github_token_ref
-  } : {}
+  env_refs = merge(
+    var.copilot_github_token_ref != null ? {
+      GITHUB_TOKEN = var.copilot_github_token_ref
+    } : {},
+    var.copilot_proxy_ref != null ? {
+      HTTP_PROXY  = var.copilot_proxy_ref
+      HTTPS_PROXY = var.copilot_proxy_ref
+      http_proxy  = var.copilot_proxy_ref
+      https_proxy = var.copilot_proxy_ref
+    } : {},
+  )
 }
 
 model_provider "work" {
@@ -75,7 +101,7 @@ worker "implement_slice" {
     max_qc_rounds    = 3
 
     gatekeeper "go_quality" {
-      command                = ["sh", "-c", "unformatted=$(gofmt -l .); if [ -n \"$unformatted\" ]; then echo \"unformatted files:\"; echo \"$unformatted\"; exit 1; fi && go vet ./... && go test ./... -count=1"]
+      command                = ["sh", "-c", "case \"$HTTPS_PROXY$http_proxy\" in *_gateway*) unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy;; esac; unformatted=$(gofmt -l .); if [ -n \"$unformatted\" ]; then echo \"unformatted files:\"; echo \"$unformatted\"; exit 1; fi && go vet ./... && go test ./... -count=1"]
       working_dir            = "."
       timeout                = "10m"
       expect_exit_code       = 0
