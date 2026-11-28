@@ -344,12 +344,22 @@ func (r *WorkerRunner) Run(ctx context.Context, req NodeExecutionRequest) (NodeO
 		effectiveSysPrompt := systemPrompt
 		turnPrompt := initialPrompt
 		resumeID := ""
+		diaryForPrompt := ""
 		if lastWorkSessionID != "" {
 			resumeID = lastWorkSessionID
 			turnPrompt = reworkPrompt
-		} else if diaryContext != "" {
-			effectiveSysPrompt = appendPromptSection(effectiveSysPrompt, diaryContext)
+		} else {
+			diaryForPrompt = diaryContext
 		}
+		effectiveSysPrompt = composeWorkSystemPrompt(effectiveSysPrompt, diaryForPrompt, buildWorkRuntimeContractPrompt(workRuntimeContractInput{
+			SandboxRuntime: workSandbox.Runtime,
+			WorkingDir:     workspaceDir,
+			WritablePaths:  req.Worker.WritablePaths,
+			Artifacts:      req.Worker.Artifacts,
+			Imports:        req.Worker.Imports,
+			TerminateTool:  terminateToolName(workBindings),
+			Fallbacks:      req.Worker.Fallbacks,
+		}))
 
 		workSkills, skillErr := prepareSessionSkills(sessionSkillsInput{
 			SkillDirectories: req.Worker.SkillDirectories,
@@ -985,10 +995,14 @@ func (r *WorkerRunner) runQCRound(ctx context.Context, req NodeExecutionRequest,
 
 	qcPrompt := buildQCPrompt(req.QCPrompt, p.Round, p.Criteria, p.Ledger)
 	qcBaseSession := harnessruntime.SessionConfig{
-		Model:                 qcModel,
-		Profile:               qcProfile,
-		ReasoningEffort:       qcEffort,
-		SystemPrompt:          "Perform an independent, read-only quality control audit of /workspace and /.sofa/artifacts against all declared criteria.",
+		Model:           qcModel,
+		Profile:         qcProfile,
+		ReasoningEffort: qcEffort,
+		SystemPrompt: appendPromptSection(qcAuditSystemPrompt, buildQCRuntimeContractPrompt(qcRuntimeContractInput{
+			SandboxRuntime: qcSandbox.Runtime,
+			WorkingDir:     p.WorkspaceDir,
+			Artifacts:      req.Worker.Artifacts,
+		})),
 		WorkingDirectory:      sandboxruntime.DefaultContainerWorkingDir,
 		SessionStoreDirectory: "/.sofa/session-store",
 		PermissionMode:        qcPermission,

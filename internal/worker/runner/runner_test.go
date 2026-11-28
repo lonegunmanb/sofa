@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,15 +20,18 @@ import (
 	harnessinstaller "github.com/lonegunmanb/sofa/internal/harness/installer"
 	harnessruntime "github.com/lonegunmanb/sofa/internal/harness/runtime"
 	harnessspec "github.com/lonegunmanb/sofa/internal/harness/spec"
+	"github.com/lonegunmanb/sofa/internal/plan"
 	"github.com/lonegunmanb/sofa/internal/provider"
 	sandboxruntime "github.com/lonegunmanb/sofa/internal/sandbox/runtime"
 	sandboxspec "github.com/lonegunmanb/sofa/internal/sandbox/spec"
 	"github.com/lonegunmanb/sofa/internal/session"
+	toolruntime "github.com/lonegunmanb/sofa/internal/tool/runtime"
 	"github.com/lonegunmanb/sofa/internal/worker/runner"
 	workerspec "github.com/lonegunmanb/sofa/internal/worker/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 const (
@@ -413,8 +417,10 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 	var workPrompts []string
 	var workResumeIDs []string
 	var workSessionProviders []*harnessruntime.ProviderConfig
+	var workSessionCfgs []harnessruntime.SessionConfig
 	var qcSessionProviders []*harnessruntime.ProviderConfig
 	var qcSessionModels []string
+	var qcSessionCfgs []harnessruntime.SessionConfig
 
 	launcher := &scriptedSessionLauncher{
 		timeline: &timeline,
@@ -424,6 +430,7 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
 					workResumeIDs = append(workResumeIDs, cfg.ResumeSessionID)
 					workSessionProviders = append(workSessionProviders, cfg.Provider)
+					workSessionCfgs = append(workSessionCfgs, cfg)
 					return &scriptedSession{
 						id:  "work-sess-1",
 						cfg: cfg,
@@ -440,6 +447,7 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 			func(_ string, req runner.SessionLaunchRequest) harnessruntime.Opener {
 				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
 					workResumeIDs = append(workResumeIDs, cfg.ResumeSessionID)
+					workSessionCfgs = append(workSessionCfgs, cfg)
 					return &scriptedSession{
 						id:  "work-sess-1",
 						cfg: cfg,
@@ -457,6 +465,7 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
 					qcSessionProviders = append(qcSessionProviders, cfg.Provider)
 					qcSessionModels = append(qcSessionModels, cfg.Model)
+					qcSessionCfgs = append(qcSessionCfgs, cfg)
 					return &scriptedSession{
 						id:  "qc-sess-1",
 						cfg: cfg,
@@ -481,6 +490,7 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 			func(_ string, _ runner.SessionLaunchRequest) harnessruntime.Opener {
 				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
 					workResumeIDs = append(workResumeIDs, cfg.ResumeSessionID)
+					workSessionCfgs = append(workSessionCfgs, cfg)
 					return &scriptedSession{
 						id:  "work-sess-1",
 						cfg: cfg,
@@ -497,6 +507,7 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
 					qcSessionProviders = append(qcSessionProviders, cfg.Provider)
 					qcSessionModels = append(qcSessionModels, cfg.Model)
+					qcSessionCfgs = append(qcSessionCfgs, cfg)
 					return &scriptedSession{
 						id:  "qc-sess-2",
 						cfg: cfg,
@@ -547,6 +558,9 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 			Prompt:        cty.StringVal("implement feature"),
 			WritablePaths: []string{"allowed/**"},
 			HumanApproval: "optional",
+			Imports: map[string]workerspec.ImportArtifact{
+				"bundle": {Name: "bundle", Path: "bundle", Desc: "Spec bundle"},
+			},
 			Artifacts: map[string]workerspec.Artifact{
 				"report": {Name: "report", Type: "file", Path: "report.json", Description: "report", Required: true, NonEmpty: true},
 			},
@@ -612,6 +626,30 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 	assert.Nil(t, qcSessionProviders[0])
 	assert.Equal(t, []string{"gemini-2.5-pro", "gemini-2.5-pro"}, qcSessionModels)
 
+	// 041: the host auto-injects the runtime/protocol contract into Work and QC prompts.
+	require.NotEmpty(t, workSessionCfgs)
+	workSysPrompt := workSessionCfgs[0].SystemPrompt
+	assert.True(t, strings.HasPrefix(workSysPrompt, "sys"), "user system_prompt must be preserved and lead the prompt")
+	assert.Contains(t, workSysPrompt, "/workspace")
+	assert.Contains(t, workSysPrompt, "git commit")
+	assert.Contains(t, workSysPrompt, "git push")
+	assert.Contains(t, workSysPrompt, "git checkout")
+	assert.Contains(t, workSysPrompt, "allowed/**")
+	assert.Contains(t, workSysPrompt, "/.sofa/artifacts/report.json")
+	assert.Contains(t, workSysPrompt, "/.sofa/imports/bundle")
+	assert.Contains(t, workSysPrompt, "sofa_checkpoint")
+	assert.Contains(t, workSysPrompt, "sofa_complete_work")
+
+	require.NotEmpty(t, qcSessionCfgs)
+	qcSysPrompt := qcSessionCfgs[0].SystemPrompt
+	assert.Contains(t, qcSysPrompt, "/workspace")
+	assert.Contains(t, qcSysPrompt, "/.sofa/artifacts/report.json")
+	assert.Contains(t, qcSysPrompt, "read-only")
+	assert.Contains(t, qcSysPrompt, "git diff")
+	assert.Contains(t, qcSysPrompt, "sofa_qc_open_issues")
+	assert.Contains(t, qcSysPrompt, "sofa_qc_resolve_issues")
+	assert.Contains(t, qcSysPrompt, "sofa_qc_submit_verdict")
+
 	// Verify host temp root was completely cleaned up.
 	entries, err := os.ReadDir(tempRoot)
 	if err == nil {
@@ -620,6 +658,94 @@ func TestWorkerRunnerReworkLoopFreezeAndQCOverrides(t *testing.T) {
 			assert.Empty(t, sub, "expected tempRoot %s/%s to have zero leftover execution dirs", tempRoot, e.Name())
 		}
 	}
+}
+
+func TestWorkerRunnerAutoInjectsCustomTerminateToolIntoWorkPrompt(t *testing.T) {
+	ctx := context.Background()
+	blobStore, err := blob.NewLocalStore(filepath.Join(t.TempDir(), "blobs"))
+	require.NoError(t, err)
+	artSvc := artifact.NewService(blobStore, artifact.ServiceOptions{})
+	cp, err := runner.NewLocalNodeControlPlane(runner.LocalNodeControlPlaneOptions{InitialEpoch: 1})
+	require.NoError(t, err)
+	fakeGit := newFakeGitAdapter(shaBase)
+
+	inputTypeJSON, err := ctyjson.MarshalType(cty.EmptyObject)
+	require.NoError(t, err)
+	outputTypeJSON, err := ctyjson.MarshalType(cty.Bool)
+	require.NoError(t, err)
+
+	var captured harnessruntime.SessionConfig
+	launcher := &scriptedSessionLauncher{
+		openers: []func(string, runner.SessionLaunchRequest) harnessruntime.Opener{
+			func(_ string, req runner.SessionLaunchRequest) harnessruntime.Opener {
+				return &scriptedOpener{onOpen: func(cfg harnessruntime.SessionConfig) (harnessruntime.Session, error) {
+					captured = cfg
+					return &scriptedSession{id: "w-custom-term", cfg: cfg, onTurn: func(_ string, cfg harnessruntime.SessionConfig) (harnessruntime.TurnSummary, error) {
+						require.NoError(t, os.WriteFile(filepath.Join(req.MountLayout.ArtifactsDir, "summary.md"), []byte("ok"), 0o644))
+						invokeToolMustOK(t, cfg, "submit_result", map[string]any{})
+						return harnessruntime.TurnSummary{FinalContent: "done"}, nil
+					}}, nil
+				}}
+			},
+		},
+	}
+
+	r, err := runner.NewWorkerRunner(runner.WorkerRunnerDeps{
+		ControlPlane:    cp,
+		GitAdapter:      fakeGit,
+		BlobStore:       blobStore,
+		ArtifactSvc:     artSvc,
+		SandboxEngine:   &mockSandboxEngine{},
+		SessionLauncher: launcher,
+		ToolExecFactory: func(string) toolruntime.ContainerExecFunc {
+			return func(context.Context, string, []string, map[string]string, []byte) (string, string, int, error) {
+				return `{"accepted":true,"output":true}`, "", 0, nil
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	outcome, err := r.Run(ctx, runner.NodeExecutionRequest{
+		RunID:          "run-custom-terminate",
+		NodeAddr:       "worker.impl",
+		Epoch:          1,
+		RepoURL:        "https://github.com/acme/repo.git",
+		BasedSource:    "main",
+		Sandboxes:      testSandboxes(),
+		Harnesses:      testHarnesses(),
+		ModelProviders: testProviders(),
+		Tools: map[string]plan.ToolSpec{
+			"finish_slice": {
+				ID:          "finish_slice",
+				Name:        "finish_slice",
+				Kind:        "go",
+				InputType:   inputTypeJSON,
+				OutputType:  outputTypeJSON,
+				InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+			},
+		},
+		Worker: workerspec.Config{
+			Sandbox:       baseSandboxRef("work"),
+			Harness:       baseHarnessRef("copilot"),
+			ModelProvider: baseProviderRef("openai"),
+			Model:         "gpt-5",
+			SystemPrompt:  cty.StringVal("domain guidance only"),
+			Prompt:        cty.StringVal("implement the slice"),
+			ToolUses: []workerspec.ToolUse{
+				{ToolID: "finish_slice", Name: "submit_result", Terminate: true},
+			},
+			Artifacts: map[string]workerspec.Artifact{
+				"summary": {Name: "summary", Type: "file", Path: "summary.md", Description: "summary", Required: true},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, runner.StatusSucceeded, outcome.Status)
+
+	assert.Contains(t, captured.SystemPrompt, "domain guidance only")
+	assert.Contains(t, captured.SystemPrompt, "submit_result")
+	assert.NotContains(t, captured.SystemPrompt, session.ToolSofaCompleteWork)
+	assert.Contains(t, captured.SystemPrompt, "/.sofa/artifacts/summary.md")
 }
 
 func TestWorkerRunnerUnauthorizedPathExhaustionHardRollback(t *testing.T) {

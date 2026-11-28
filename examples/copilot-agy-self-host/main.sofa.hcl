@@ -74,12 +74,6 @@ worker "implement_slice" {
 
   system_prompt = <<-EOT
     Follow AGENTS.md and .specify/memory/constitution.md strictly, and write a concise change summary to ${artifact("summary").path}.
-
-    # TODO(041): Remove once WorkerRunner auto-injects runtime/protocol constraints into system_prompt.
-    Runtime & Protocol Constraints:
-    - Working directory is /workspace with read-only /workspace/.git. NEVER run git add, git commit, git push, or git checkout (the host manages Git snapshots and branches automatically).
-    - Only modify paths matching writable_paths: ${join(", ", var.writable_paths)}.
-    - Use sofa_checkpoint to record progress diaries at milestones, and MUST call sofa_complete_work once verification passes and ${artifact("summary").path} is written.
   EOT
 
   prompt = var.slice_prompt
