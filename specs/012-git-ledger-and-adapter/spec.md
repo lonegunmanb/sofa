@@ -25,7 +25,7 @@ Before checkpointing, completing work, or entering a gatekeeper container, the h
 ### User Story 3 - Zero-Credential-Persistence Host `git` CLI Adapter (`internal/git/adapter.go`, `internal/git/cli.go`) (Priority: P1)
 
 `CLIAdapter` implements `Adapter` using the host `git` CLI without any shared bare cache:
-- `PrepareWorkspace` initializes an isolated repo (`user.name`, `user.email`, `commit.gpgsign = false`), fetches `--no-tags` for the target branch into `refs/remotes/sofa/base` with zero credentials persisted in `.git/config`, verifies `pinSHA` is a valid commit ancestor of the fetched tip, and checks out a local `work` branch at `pinSHA`.
+- `PrepareWorkspace` initializes an isolated repo (`user.name`, `user.email`, `commit.gpgsign = false`, `core.autocrlf = false`), fetches `--no-tags` for the target branch into `refs/remotes/sofa/base` with zero credentials persisted in `.git/config`, verifies `pinSHA` is a valid commit ancestor of the fetched tip, and checks out a local `work` branch at `pinSHA`.
 - `buildAuthEnv` injects `GIT_TERMINAL_PROMPT=0` plus either HTTPS `GIT_CONFIG_*` `http.extraHeader` (`Authorization: Basic ...`, redacting both raw token and encoded header in any error) or `GIT_SSH_COMMAND` (writing inline `-----BEGIN` keys to a temp file with `0600` / Windows protected DACL and removing it via `defer` after command completion).
 - `StatusPaths` parses `git -c core.quotepath=false status --porcelain=v1 -z -uall` NUL-delimited output cleanly.
 - `RevertPaths` reverts unauthorized tracked/staged changes (`git checkout HEAD --` / `git reset HEAD --`) and deletes unauthorized untracked/newly-staged files safely via `os.OpenRoot(workspaceDir)` while pruning newly emptied parent directories and preserving all authorized modifications.
@@ -40,6 +40,7 @@ Before checkpointing, completing work, or entering a gatekeeper container, the h
 - `git status --porcelain=v1 -z -uall` emits `XY <newPath>\x00<oldPath>\x00` for renames (`R`) and copies (`C`), which must be parsed with `Path = newPath` and `OldPath = oldPath`.
 - Staging newly added files (`A ` or rename destination not in `HEAD`) passed to `RevertPaths` must be unstaged (`git reset HEAD --`) and removed via `os.OpenRoot` without failing `git checkout HEAD --`.
 - On Windows, temp SSH private key files must close all handles before applying current-user protected DACL (`D:P(A;;FA;;;<sid>)`), and `GIT_SSH_COMMAND` must pass slash-normalized quoted paths.
+- Isolated repositories initialized on Windows hosts where global Git config has `core.autocrlf = true` MUST set `core.autocrlf = false` locally so checked-out source files preserve exact LF repository bytes when bind-mounted into Linux containers (preventing `gofmt -l` and `git status` CRLF mismatches on read-only mounts).
 
 ## Requirements
 

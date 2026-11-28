@@ -402,3 +402,9 @@ func TestNormalizeBranchNameAndPrefixBypassPrevention(t *testing.T) {
 	)
 	require.Equal(t, []BranchTarget{{RepoURL: repo, Branch: work1}}, cleanup)
 }
+
+func TestIsolatedRepoInitCommandsDisableAutoCRLF(t *testing.T) {
+	t.Parallel()
+	cmds := isolatedRepoInitCommands()
+	require.Contains(t, cmds, []string{"config", "core.autocrlf", "false"})
+}

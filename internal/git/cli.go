@@ -286,16 +286,21 @@ func (a *CLIAdapter) runGit(ctx context.Context, workDir string, env []string, s
 	return stdoutStr, stderrStr, exitCode, fmt.Errorf("git %s: %s", args[0], errMsg)
 }
 
-func (a *CLIAdapter) initIsolatedRepo(ctx context.Context, dir string, env []string, secrets []string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create git directory %q: %w", dir, err)
-	}
-	for _, args := range [][]string{
+func isolatedRepoInitCommands() [][]string {
+	return [][]string{
 		{"init"},
 		{"config", "user.name", "sofa-worker"},
 		{"config", "user.email", "sofa-worker@sofa.local"},
 		{"config", "commit.gpgsign", "false"},
-	} {
+		{"config", "core.autocrlf", "false"},
+	}
+}
+
+func (a *CLIAdapter) initIsolatedRepo(ctx context.Context, dir string, env []string, secrets []string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create git directory %q: %w", dir, err)
+	}
+	for _, args := range isolatedRepoInitCommands() {
 		if _, _, _, err := a.runGit(ctx, dir, env, secrets, args...); err != nil {
 			return err
 		}

@@ -35,6 +35,7 @@ func initBareRepoWithBaseCommit(t *testing.T) (bareDir, seedDir, baseSHA string)
 	runTestGit(t, seedDir, "config", "user.name", "seed")
 	runTestGit(t, seedDir, "config", "user.email", "seed@sofa.local")
 	runTestGit(t, seedDir, "config", "commit.gpgsign", "false")
+	runTestGit(t, seedDir, "config", "core.autocrlf", "false")
 
 	writeSeedFile := func(rel, content string) {
 		full := filepath.Join(seedDir, filepath.FromSlash(rel))
@@ -347,4 +348,22 @@ func TestCLIAdapterPushCommitAndForceWithLeaseIntegration(t *testing.T) {
 	tipAfterValid, err := adapter.ResolveBranchSHA(ctx, bareDir, mergeBranch, AuthConfig{})
 	require.NoError(t, err)
 	require.Equal(t, out2.RebasedSHA, tipAfterValid)
+}
+
+func TestCLIAdapterPrepareWorkspacePreservesLFUnderGlobalAutoCRLFIntegration(t *testing.T) {
+	ctx := context.Background()
+	bareDir, _, baseSHA := initBareRepoWithBaseCommit(t)
+
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(globalCfg, []byte("[core]\n\tautocrlf = true\n"), 0o644))
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+
+	adapter := NewCLIAdapter(CLIAdapterOptions{})
+	wsDir := filepath.Join(t.TempDir(), "ws-lf")
+	require.NoError(t, adapter.PrepareWorkspace(ctx, bareDir, "main", baseSHA, wsDir, AuthConfig{}))
+
+	raw, err := os.ReadFile(filepath.Join(wsDir, "cmd", "app.go"))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "\r\n", "PrepareWorkspace must preserve exact LF bytes even when global git config sets core.autocrlf=true")
+	require.Equal(t, "package main\nfunc main() {}\n", string(raw))
 }
